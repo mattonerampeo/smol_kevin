@@ -7,7 +7,7 @@
 //! features = ["client", "standard_framework", "voice"]
 //! ```
 
-const BUFFER_SIZE: usize = 1440000;
+const BUFFER_SIZE: usize = 2880000;
 const SPEC: hound::WavSpec = hound::WavSpec {
     channels: 2,
     sample_rate: 48000,
@@ -160,6 +160,12 @@ async fn main() {
         DriverConfig::default()
             .decode_mode(DecodeMode::Decode)
     );
+
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.expect("Could not get signal");
+        println!("Shutting down shards");
+        shard_manager.lock().await.shutdown_all().await;
+    });
 
     let mut client = Client::builder(&token)
         .event_handler(Handler)
