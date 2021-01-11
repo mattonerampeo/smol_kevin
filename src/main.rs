@@ -7,27 +7,20 @@
 //! features = ["client", "standard_framework", "voice"]
 //! ```
 
-const BUFFER_SIZE: usize = 2880000;
-const SPEC: hound::WavSpec = hound::WavSpec {
-    channels: 2,
-    sample_rate: 48000,
-    bits_per_sample: 16,
-    sample_format: hound::SampleFormat::Int,
-};
-
+use std::collections::HashMap;
 use std::env;
+use std::sync::{Arc, Mutex};
 
 use hound;
-
 use serenity::{
     async_trait,
     client::{Client, Context, EventHandler},
     framework::{
-        StandardFramework,
         standard::{
-            macros::{command, group},
             CommandResult,
+            macros::{command, group, hook},
         },
+        StandardFramework,
     },
     model::{
         channel::Message,
@@ -36,21 +29,26 @@ use serenity::{
     },
     Result as SerenityResult,
 };
-
+use serenity::model::prelude::GuildId;
+use serenity::prelude::TypeMapKey;
 use songbird::{
-    driver::{Config as DriverConfig, DecodeMode},
     CoreEvent,
+    driver::{Config as DriverConfig, DecodeMode},
     Event,
     EventContext,
     EventHandler as VoiceEventHandler,
     SerenityInit,
     Songbird,
 };
-use std::sync::{Mutex, Arc};
-use serenity::prelude::TypeMapKey;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
-use serenity::model::prelude::GuildId;
+
+const BUFFER_SIZE: usize = 2880000;
+const SPEC: hound::WavSpec = hound::WavSpec {
+    channels: 2,
+    sample_rate: 48000,
+    bits_per_sample: 16,
+    sample_format: hound::SampleFormat::Int,
+};
 
 struct Handler;
 
@@ -135,8 +133,13 @@ impl VoiceEventHandler for Receiver {
     }
 }
 
+#[hook]
+pub async fn after(ctx: &Context, msg: &Message, _: &str, _: CommandResult) {
+    msg.delete(&ctx.http).await.expect("failed to delete message");
+}
+
 #[group]
-#[commands(join, leave, dump)]
+#[commands(join, leave, dump, clean)]
 struct General;
 
 #[tokio::main]
@@ -149,8 +152,11 @@ async fn main() {
 
     let framework = StandardFramework::new()
         .configure(|c| c
-            .prefix("!"))
-        .group(&GENERAL_GROUP);
+            .ignore_bots(true)
+            .with_whitespace(true)
+            .prefix("#"))
+        .group(&GENERAL_GROUP)
+        .after(after);
 
     // Here, we need to configure Songbird to decode all incoming voice packets.
     // If you want, you can do this on a per-call basis---here, we need it to
@@ -160,12 +166,6 @@ async fn main() {
         DriverConfig::default()
             .decode_mode(DecodeMode::Decode)
     );
-
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.expect("Could not get signal");
-        println!("Shutting down shards");
-        shard_manager.lock().await.shutdown_all().await;
-    });
 
     let mut client = Client::builder(&token)
         .event_handler(Handler)
@@ -183,6 +183,7 @@ async fn main() {
 }
 
 #[command]
+#[aliases("j")]
 #[only_in(guilds)]
 async fn join(ctx: &Context, msg: &Message) -> CommandResult {
     let channel_id = if let Some(id) = msg
@@ -233,6 +234,7 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
 }
 
 #[command]
+#[aliases("l")]
 #[only_in(guilds)]
 async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.unwrap();
@@ -256,6 +258,7 @@ async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
 }
 
 #[command]
+#[aliases("d")]
 #[only_in(guilds)]
 async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.expect("could not find guild from message");
@@ -280,11 +283,30 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
                 paths.push(path);
             }
         }
+        check_msg(msg.channel_id.send_message(ctx, |m| m.content("Starting the big DUMP")).await);
         for path in paths.iter() {
             msg.channel_id.send_message(ctx, |m| m.add_file(&path[..])).await.expect("Error sending audio files to discord");
             std::fs::remove_file(&path[..]).expect("failed to remove file");
         }
+        check_msg(msg.channel_id.send_message(ctx, |m| m.content("done")).await);
     }
+    Ok(())
+}
+
+#[command]
+#[aliases("c")]
+#[only_in(guilds)]
+async fn clean(ctx: &Context, msg: &Message) -> CommandResult {
+    let guild = msg.guild(&ctx.cache).await.expect("could not find guild from message");
+    let guild_id = guild.id;
+    {
+        let data_read = ctx.data.read().await;
+        let buffers_lock = data_read.get::<AudioBuffers>().expect("Typemap incomplete").clone();
+        let buffer_lock = buffers_lock.read().await.get(&guild_id).expect("could not acquire a read lock on the data").clone();
+        let mut buffer = buffer_lock.lock().expect("failed to get a write lock for buffer");
+        buffer.clear();
+    }
+    check_msg(msg.channel_id.send_message(ctx, |m| m.content("The buffer has been cleared. No need to thank me")).await);
     Ok(())
 }
 
