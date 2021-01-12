@@ -51,7 +51,7 @@ use songbird::{
 };
 use tokio::sync::RwLock;
 
-const BUFFER_SIZE: usize = 2880000;
+const BUFFER_SIZE: usize = 1440000;
 const SPEC: hound::WavSpec = hound::WavSpec {
     channels: 2,
     sample_rate: 48000,
@@ -245,8 +245,6 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
         let (handler_lock, conn_result) = manager.join(guild_id, channel_id).await;
 
         if let Ok(_) = conn_result {
-            // NOTE: this skips listening for the actual connection result.
-            let mut handler = handler_lock.lock().await;
 
             let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
             let ssrc_map: HashMap<u32, UserId> = HashMap::new();
@@ -256,6 +254,9 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
                 let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
                 buffers_lock.write().await.insert(guild_id, lobby.clone());
             }
+
+            // NOTE: this skips listening for the actual connection result.
+            let mut handler = handler_lock.lock().await;
 
             handler.add_global_event(
                 CoreEvent::VoicePacket.into(),
@@ -281,7 +282,7 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
 
 #[command]
 #[aliases("l")]
-#[description = "Let the bot leave the voice channel currently in use."]
+#[description = "Let the bot leave the voice channel currently in use. (this clears the server audio buffers)"]
 #[only_in(guilds)]
 async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.unwrap();
@@ -289,9 +290,8 @@ async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
 
     let manager = songbird::get(ctx).await
         .expect("Songbird Voice client placed in at initialisation.").clone();
-    let handler = manager.get(guild_id);
 
-    if let Some(_) = handler {
+    if let Some(_) = manager.get(guild_id) {
         if let Err(e) = manager.remove(guild_id).await {
             check_msg(msg.channel_id.say(&ctx.http, format!("Failed: {:?}", e)).await);
         }
@@ -299,6 +299,16 @@ async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
         check_msg(msg.channel_id.say(&ctx.http, "Left voice channel").await);
     } else {
         check_msg(msg.reply(ctx, "Not in a voice channel").await);
+    }
+
+    // to prevent poison errors, whenever the bot leaves it deletes the buffer for the server
+    let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
+    let ssrc_map: HashMap<u32, UserId> = HashMap::new();
+    let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
+    {
+        let data_write = ctx.data.write().await;
+        let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
+        buffers_lock.write().await.insert(guild_id, lobby.clone());
     }
 
     Ok(())
@@ -319,20 +329,25 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
         let mut paths = Vec::new();
         {
             let data_read = ctx.data.read().await;
-            let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
-            let lobby_lock = lobbies_lock.read().await.get(&guild_id).expect("could not acquire a read lock on the data").clone();
-            let mut lobby = lobby_lock.0.lock().unwrap();
-            let ssrc_map = lobby_lock.1.lock().unwrap();
-            for (id, buffer) in lobby.drain() {
-                let name = &members.get(ssrc_map.get(&id).expect("ssrc not in map")).unwrap().user.name;
-                let path = format!("{}/{}.wav", directory, *name);
-                let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
-                for sample in buffer.pop().iter() {
-                    writer.write_sample(*sample)?;
+            let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete");
+            if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id) {
+                let mut lobby = lobby_lock.0.lock().unwrap();
+                let ssrc_map = lobby_lock.1.lock().unwrap();
+                for (id, buffer) in lobby.drain() {
+                    if let Some(user_id) = ssrc_map.get(&id) {
+                        if let Some(member) = &members.get(user_id) {
+                            let name = member.user.name.clone();
+                            let path = format!("{}/{}.wav", directory, name);
+                            let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
+                            for sample in buffer.pop().iter() {
+                                writer.write_sample(*sample)?;
+                            }
+                            writer.finalize().unwrap();
+                            paths.push(path);
+                        }
+                    }
                 }
-                writer.finalize().unwrap();
-                paths.push(path);
-            }
+            };
         }
         for path in paths.iter() {
             msg.channel_id.send_message(ctx, |m| m.add_file(&path[..])).await.expect("Error sending audio files to discord");
@@ -348,7 +363,6 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
 #[only_in(guilds)]
 async fn clean(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.expect("could not find guild from message");
-
     let guild_id = guild.id;
     {
         let data_read = ctx.data.read().await;
