@@ -302,13 +302,12 @@ async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
     }
 
     // to prevent poison errors, whenever the bot leaves it deletes the buffer for the server
-    let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
-    let ssrc_map: HashMap<u32, UserId> = HashMap::new();
-    let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
     {
         let data_write = ctx.data.write().await;
         let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
-        buffers_lock.write().await.insert(guild_id, lobby.clone());
+        if let Some(_) = buffers_lock.write().await.remove(&guild_id) {
+            check_msg(msg.channel_id.say(&ctx.http, "Audio buffer has been deleted.").await);
+        };
     }
 
     Ok(())
@@ -329,8 +328,8 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
         let mut paths = Vec::new();
         {
             let data_read = ctx.data.read().await;
-            let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete");
-            if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id) {
+            let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
+            if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
                 let mut lobby = lobby_lock.0.lock().unwrap();
                 let ssrc_map = lobby_lock.1.lock().unwrap();
                 for (id, buffer) in lobby.drain() {
