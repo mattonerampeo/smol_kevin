@@ -7,37 +7,45 @@
 //! features = ["client", "standard_framework", "voice"]
 //! ```
 
-use std::collections::HashMap;
-use std::env;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+    sync::{Arc, Mutex}
+};
 
 use hound;
+
 use serenity::{
+    prelude::TypeMapKey,
     async_trait,
     client::{Client, Context, EventHandler},
     framework::{
         standard::{
             CommandResult,
-            macros::{command, group, hook},
+            macros::{command, group, help, hook},
+            Args,
+            CommandGroup,
+            help_commands,
+            HelpOptions,
         },
         StandardFramework,
     },
     model::{
         channel::Message,
-        gateway::Ready,
-        misc::Mentionable
+        gateway::{Ready, Activity},
+        misc::Mentionable,
+        prelude::{GuildId, UserId}
     },
     Result as SerenityResult,
 };
-use serenity::model::prelude::{GuildId, UserId};
-use serenity::prelude::TypeMapKey;
+
 use songbird::{
-    driver::{Config as DriverConfig, DecodeMode},
-    model::payload::{Speaking},
     CoreEvent,
+    driver::{Config as DriverConfig, DecodeMode},
     Event,
     EventContext,
     EventHandler as VoiceEventHandler,
+    model::payload::Speaking,
     SerenityInit,
     Songbird,
 };
@@ -55,7 +63,8 @@ struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
+        ctx.shard.set_activity(Some(Activity::playing("#help")));
         println!("{} is connected!", ready.user.name);
     }
 }
@@ -67,22 +76,22 @@ struct Buffer {
 
 impl Buffer {
     fn new() -> Self {
-        Self{
-            buf: vec![0;BUFFER_SIZE],
-            pos: BUFFER_SIZE
+        Self {
+            buf: vec![0; BUFFER_SIZE],
+            pos: BUFFER_SIZE,
         }
     }
 
     fn push(&mut self, val: &Vec<i16>) {
         for bits in val {
-            self.pos = if self.pos < BUFFER_SIZE - 1 {self.pos + 1} else {0};
+            self.pos = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
             self.buf[self.pos] = *bits;
         }
     }
 
     fn pop(&self) -> Vec<i16> {
-        let start = if self.pos < BUFFER_SIZE - 1 {self.pos + 1} else {0};
-        [&self.buf[start ..], &self.buf[.. start]].concat()
+        let start = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
+        [&self.buf[start..], &self.buf[..start]].concat()
     }
 }
 
@@ -110,7 +119,7 @@ impl VoiceEventHandler for Receiver {
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         use EventContext as Ctx;
         match ctx {
-            Ctx::VoicePacket {audio, packet, payload_offset, payload_end_pad} => {
+            Ctx::VoicePacket { audio, packet, payload_offset, payload_end_pad } => {
                 // An event which fires for every received audio packet,
                 // containing the decoded data.
                 if let Some(audio) = audio {
@@ -123,9 +132,9 @@ impl VoiceEventHandler for Receiver {
                         buffer.insert(packet.ssrc, new_buffer);
                     }
                 }
-            },
+            }
             Ctx::SpeakingStateUpdate(
-                Speaking {speaking, ssrc, user_id, ..}
+                Speaking { speaking, ssrc, user_id, .. }
             ) => {
                 // You can implement your own logic here to handle a user who has joined the
                 // voice channel e.g., allocate structures, map their SSRC to User ID.
@@ -134,7 +143,7 @@ impl VoiceEventHandler for Receiver {
                     let id = user_id.0;
                     buffer.insert(*ssrc, UserId(id));
                 }
-            },
+            }
             _ => {
                 // We won't be registering this struct for any more event classes.
                 unimplemented!()
@@ -168,7 +177,8 @@ async fn main() {
             .with_whitespace(true)
             .prefix("#"))
         .group(&GENERAL_GROUP)
-        .after(after);
+        .after(after)
+        .help(&MY_HELP);
 
     // Here, we need to configure Songbird to decode all incoming voice packets.
     // If you want, you can do this on a per-call basis---here, we need it to
@@ -194,11 +204,31 @@ async fn main() {
     let _ = client.start().await.map_err(|why| println!("Client ended: {:?}", why));
 }
 
+#[help]
+#[command_not_found_text = "Could not find: `{}`."]
+#[no_help_available_text("FUCK OFF.")]
+#[strikethrough_commands_tip_in_guild("")]
+#[individual_command_tip =
+"Hello!\n\
+If you want more information about a specific command, just pass the command as argument."]
+async fn my_help(
+    context: &Context,
+    msg: &Message,
+    args: Args,
+    help_options: &'static HelpOptions,
+    groups: &[&'static CommandGroup],
+    owners: HashSet<UserId>,
+) -> CommandResult {
+    let _ = help_commands::with_embeds(context, msg, args, help_options, groups, owners).await;
+    Ok(())
+}
+
 #[command]
 #[aliases("j")]
+#[description = "Let the bot join your channel."]
 #[only_in(guilds)]
 async fn join(ctx: &Context, msg: &Message) -> CommandResult {
-    let channel_id = if let Some(id) = msg
+    if let Some(channel_id) = msg
         .guild(&ctx.cache)
         .await
         .unwrap()
@@ -206,53 +236,52 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
         .get(&msg.author.id)
         .and_then(|vs| vs.channel_id)
     {
-        id
-    } else {
-        msg.reply(&ctx, "not in a voice channel").await?;
-        return Ok(());
-    };
+        let guild = msg.guild(&ctx.cache).await.unwrap();
+        let guild_id = guild.id;
 
-    let guild = msg.guild(&ctx.cache).await.unwrap();
-    let guild_id = guild.id;
+        let manager = songbird::get(ctx).await
+            .expect("Songbird Voice client placed in at initialisation.").clone();
 
-    let manager = songbird::get(ctx).await
-        .expect("Songbird Voice client placed in at initialisation.").clone();
+        let (handler_lock, conn_result) = manager.join(guild_id, channel_id).await;
 
-    let (handler_lock, conn_result) = manager.join(guild_id, channel_id).await;
+        if let Ok(_) = conn_result {
+            // NOTE: this skips listening for the actual connection result.
+            let mut handler = handler_lock.lock().await;
 
-    if let Ok(_) = conn_result {
-        // NOTE: this skips listening for the actual connection result.
-        let mut handler = handler_lock.lock().await;
+            let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
+            let ssrc_map: HashMap<u32, UserId> = HashMap::new();
+            let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
+            {
+                let data_write = ctx.data.write().await;
+                let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
+                buffers_lock.write().await.insert(guild_id, lobby.clone());
+            }
 
-        let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
-        let ssrc_map: HashMap<u32, UserId> = HashMap::new();
-        let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
-        {
-            let data_write = ctx.data.write().await;
-            let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
-            buffers_lock.write().await.insert(guild_id, lobby.clone());
+            handler.add_global_event(
+                CoreEvent::VoicePacket.into(),
+                Receiver::new(lobby.clone()),
+            );
+
+            handler.add_global_event(
+                CoreEvent::SpeakingStateUpdate.into(),
+                Receiver::new(lobby.clone()),
+            );
+
+            check_msg(msg.channel_id.say(&ctx.http, &format!("Joined {}", channel_id.mention())).await);
+        } else {
+            check_msg(msg.channel_id.say(&ctx.http, "Error joining the channel").await);
         }
 
-        handler.add_global_event(
-            CoreEvent::VoicePacket.into(),
-            Receiver::new(lobby.clone()),
-        );
-
-        handler.add_global_event(
-            CoreEvent::SpeakingStateUpdate.into(),
-            Receiver::new(lobby.clone()),
-        );
-
-        check_msg(msg.channel_id.say(&ctx.http, &format!("Joined {}", channel_id.mention())).await);
+        Ok(())
     } else {
-        check_msg(msg.channel_id.say(&ctx.http, "Error joining the channel").await);
+        check_msg(msg.reply(&ctx, "not in a voice channel").await);
+        Ok(())
     }
-
-    Ok(())
 }
 
 #[command]
 #[aliases("l")]
+#[description = "Let the bot leave the voice channel currently in use."]
 #[only_in(guilds)]
 async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.unwrap();
@@ -267,7 +296,7 @@ async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
             check_msg(msg.channel_id.say(&ctx.http, format!("Failed: {:?}", e)).await);
         }
 
-        check_msg(msg.channel_id.say(&ctx.http,"Left voice channel").await);
+        check_msg(msg.channel_id.say(&ctx.http, "Left voice channel").await);
     } else {
         check_msg(msg.reply(ctx, "Not in a voice channel").await);
     }
@@ -277,6 +306,7 @@ async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
 
 #[command]
 #[aliases("d")]
+#[description = "Dump the guild's audio buffer in the text channel."]
 #[only_in(guilds)]
 async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.expect("could not find guild from message");
@@ -295,7 +325,7 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
             let ssrc_map = lobby_lock.1.lock().unwrap();
             for (id, buffer) in lobby.drain() {
                 let name = &members.get(ssrc_map.get(&id).expect("ssrc not in map")).unwrap().user.name;
-                let path = format!("{}/{}.wav",directory, *name);
+                let path = format!("{}/{}.wav", directory, *name);
                 let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
                 for sample in buffer.pop().iter() {
                     writer.write_sample(*sample)?;
@@ -304,18 +334,17 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
                 paths.push(path);
             }
         }
-        check_msg(msg.channel_id.send_message(ctx, |m| m.content("Starting the big DUMP")).await);
         for path in paths.iter() {
             msg.channel_id.send_message(ctx, |m| m.add_file(&path[..])).await.expect("Error sending audio files to discord");
             std::fs::remove_file(&path[..]).expect("failed to remove file");
         }
-        check_msg(msg.channel_id.send_message(ctx, |m| m.content("done")).await);
     }
     Ok(())
 }
 
 #[command]
 #[aliases("c")]
+#[description = "Clear the guild's audio buffer."]
 #[only_in(guilds)]
 async fn clean(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.expect("could not find guild from message");
