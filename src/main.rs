@@ -261,6 +261,9 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
             // NOTE: this skips listening for the actual connection result.
             let mut handler = handler_lock.lock().await;
 
+            let _ = handler.deafen(true).await;
+            let _ = handler.mute(true).await;
+
             handler.add_global_event(
                 CoreEvent::VoicePacket.into(),
                 Receiver::new(lobby.clone()),
