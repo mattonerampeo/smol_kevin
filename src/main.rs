@@ -171,11 +171,14 @@ async fn main() {
     let token = env::var("DISCORD_TOKEN")
         .expect("Expected a token in the environment");
 
+    let prefix = env::var("DISCORD_PREFIX")
+        .expect("Expected a prefix in the environment");
+
     let framework = StandardFramework::new()
         .configure(|c| c
             .ignore_bots(true)
             .with_whitespace(true)
-            .prefix("#"))
+            .prefix(&prefix[..]))
         .group(&GENERAL_GROUP)
         .after(after)
         .help(&MY_HELP);
