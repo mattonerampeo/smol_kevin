@@ -10,7 +10,7 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
-    sync::{Arc, Mutex}
+    sync::Arc,
 };
 
 use hound;
@@ -49,9 +49,9 @@ use songbird::{
     SerenityInit,
     Songbird,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Mutex};
 
-const BUFFER_SIZE: usize = 1440000;
+const BUFFER_SIZE: usize = 2880000;
 const SPEC: hound::WavSpec = hound::WavSpec {
     channels: 2,
     sample_rate: 48000,
@@ -123,7 +123,7 @@ impl VoiceEventHandler for Receiver {
                 // An event which fires for every received audio packet,
                 // containing the decoded data.
                 if let Some(audio) = audio {
-                    let buffer = &mut self.lobby.0.lock().unwrap();
+                    let buffer = &mut self.lobby.0.lock().await;
                     if let Some(buffer) = buffer.get_mut(&packet.ssrc) {
                         buffer.push(audio);
                     } else {
@@ -138,7 +138,7 @@ impl VoiceEventHandler for Receiver {
             ) => {
                 // You can implement your own logic here to handle a user who has joined the
                 // voice channel e.g., allocate structures, map their SSRC to User ID.
-                let buffer = &mut self.lobby.1.lock().unwrap();
+                let buffer = &mut self.lobby.1.lock().await;
                 if let Some(user_id) = user_id {
                     let id = user_id.0;
                     buffer.insert(*ssrc, UserId(id));
@@ -331,33 +331,33 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
     if let Err(why) = std::fs::create_dir_all(directory) {
         eprintln!("error: {}", why)
     } else {
-        let mut paths = Vec::new();
-        {
-            let data_read = ctx.data.read().await;
-            let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
-            if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
-                let mut lobby = lobby_lock.0.lock().unwrap();
-                let ssrc_map = lobby_lock.1.lock().unwrap();
-                for (id, buffer) in lobby.drain() {
-                    if let Some(user_id) = ssrc_map.get(&id) {
-                        if let Some(member) = &members.get(user_id) {
-                            let name = member.user.name.clone();
-                            let path = format!("{}/{}.wav", directory, name);
-                            let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
-                            for sample in buffer.pop().iter() {
-                                writer.write_sample(*sample)?;
+        let data_read = ctx.data.read().await;
+        let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
+        if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
+            let mut lobby = lobby_lock.0.lock().await;
+            let ssrc_map = lobby_lock.1.lock().await;
+            for (id, buffer) in lobby.drain() {
+                if let Some(user_id) = ssrc_map.get(&id) {
+                    if let Some(member) = &members.get(user_id) {
+                        let name = member.user.name.clone();
+                        let path = format!("{}/audio.wav", directory);
+                        let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
+                        let mut writer = writer.get_i16_writer(BUFFER_SIZE as u32);
+                        //let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
+                        for sample in buffer.pop().iter() {
+                            writer.write_sample(*sample);
+                        }
+                        if let Err(_) = writer.flush() {
+                            check_msg(msg.channel_id.send_message(ctx, |m| m.content("There was an error in the creation of {}.wav. I'm sorry")).await);
+                        } else {
+                            if let Ok(file) = tokio::fs::File::open(&path).await {
+                                check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((&file, &format!("{}.wav", &name)[..]))).await);
                             }
-                            writer.finalize().unwrap();
-                            paths.push(path);
                         }
                     }
                 }
-            };
-        }
-        for path in paths.iter() {
-            msg.channel_id.send_message(ctx, |m| m.add_file(&path[..])).await.expect("Error sending audio files to discord");
-            std::fs::remove_file(&path[..]).expect("failed to remove file");
-        }
+            }
+        };
     }
     Ok(())
 }
@@ -373,7 +373,7 @@ async fn clean(ctx: &Context, msg: &Message) -> CommandResult {
         let data_read = ctx.data.read().await;
         let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
         let lobby_lock = lobbies_lock.read().await.get(&guild_id).expect("could not acquire a read lock on the data").clone();
-        let buffer = &mut lobby_lock.0.lock().expect("could not acquire a read lock on the data");
+        let buffer = &mut lobby_lock.0.lock().await;
         buffer.clear();
     }
     check_msg(msg.channel_id.send_message(ctx, |m| m.content("The buffer has been cleared. No need to thank me")).await);
