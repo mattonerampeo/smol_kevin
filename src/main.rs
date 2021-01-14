@@ -364,7 +364,7 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
                                     Err(why) => panic!("Process failed on wait: {}", why),
                                     Ok(output) => {
                                         let mp3_buffer = output.stdout.as_slice();
-                                        check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((mp3_buffer, &format!("{}.ogg", &name)[..]))).await);
+                                        check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((mp3_buffer, &format!("{}.flac", &name)[..]))).await);
                                     }
                                 }
                             }
