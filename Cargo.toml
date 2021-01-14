@@ -1,5 +1,5 @@
 [package]
-name = "xi_jin_dj"
+name = "smol_kevin"
 version = "0.1.0"
 authors = ["rm <46228228+RampeoMattone@users.noreply.github.com>"]
 edition = "2018"
@@ -10,6 +10,7 @@ tracing = "0.1"
 tracing-subscriber = "0.2"
 tracing-futures = "0.2"
 songbird = "0.1.0"
+discortp = "0.2"
 
 [dependencies.serenity]
 version = "0.10.2"

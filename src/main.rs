@@ -112,8 +112,6 @@ impl VoiceEventHandler for Receiver {
         use EventContext as Ctx;
         match ctx {
             Ctx::VoicePacket { audio, packet, .. } => {
-                // An event which fires for every received audio packet,
-                // containing the decoded data.
                 if let Some(audio) = audio {
                     let buffer = &mut self.lobby.0.lock().await;
                     if let Some(buffer) = buffer.get_mut(&packet.ssrc) {
@@ -129,8 +127,6 @@ impl VoiceEventHandler for Receiver {
             Ctx::SpeakingStateUpdate(
                 Speaking { ssrc, user_id, .. }
             ) => {
-                // You can implement your own logic here to handle a user who has joined the
-                // voice channel e.g., allocate structures, map their SSRC to User ID.
                 let ssrc_to_user_map = &mut self.lobby.1.lock().await;
                 if let Some(user_id) = user_id {
                     let id = user_id.0;
@@ -351,7 +347,7 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
                     if let Some(member) = &members.get(user_id) {
                         let name = member.user.name.clone();
                         let mut process = match Command::new("ffmpeg")
-                            .args(&["-nostdin", "-y", "-f", "s16be", "-ac", "2", "-ar", "48k", "-i", "-", "-f", "opus", "-ac", "1", "-"])
+                            .args(&["-nostdin", "-f", "s16be", "-ac", "2", "-ar", "48k", "-i", "-", "-f", "mp3", "-b:a", "128k","-ac", "1", "-"])
                             .stdin(Stdio::piped())
                             .stdout(Stdio::piped())
                             .spawn() {
