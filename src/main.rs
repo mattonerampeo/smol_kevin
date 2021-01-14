@@ -50,14 +50,12 @@ use songbird::{
 };
 use tokio::sync::{Mutex, RwLock};
 
-const BUFFER_SIZE: usize = 2880000;
-
 struct Handler;
 
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        ctx.shard.set_activity(Some(Activity::playing("#help")));
+        ctx.shard.set_activity(Some(Activity::playing("with voicelines")));
         println!("{} is connected!", ready.user.name);
     }
 }
@@ -69,21 +67,22 @@ struct Buffer {
 
 impl Buffer {
     fn new() -> Self {
+        let size = buffer_size();
         Self {
-            buf: vec![0; BUFFER_SIZE],
-            pos: BUFFER_SIZE,
+            buf: vec![0; size],
+            pos: size,
         }
     }
 
     fn push(&mut self, val: Vec<u8>) {
         for byte in val {
-            self.pos = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
+            self.pos = if self.pos < self.buf.capacity() - 1 { self.pos + 1 } else { 0 };
             self.buf[self.pos] = byte;
         }
     }
 
     fn pop(&self) -> Vec<u8> {
-        let start = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
+        let start = if self.pos < self.buf.capacity() - 1 { self.pos + 1 } else { 0 };
         [&self.buf[start..], &self.buf[..start]].concat()
     }
 }
@@ -112,21 +111,20 @@ impl VoiceEventHandler for Receiver {
         use EventContext as Ctx;
         match ctx {
             Ctx::VoicePacket { audio, packet, .. } => {
+
                 if let Some(audio) = audio {
-                    let buffer = &mut self.lobby.0.lock().await;
-                    if let Some(buffer) = buffer.get_mut(&packet.ssrc) {
+                    let buffers_map = &mut self.lobby.0.lock().await;
+                    if let Some(buffer) = buffers_map.get_mut(&packet.ssrc) {
                         buffer.push(get_bytes(audio));
                     } else {
                         let mut new_buffer = Buffer::new();
                         new_buffer.push(get_bytes(audio));
-                        buffer.insert(packet.ssrc, new_buffer);
+                        buffers_map.insert(packet.ssrc, new_buffer);
                     }
                 }
             }
 
-            Ctx::SpeakingStateUpdate(
-                Speaking { ssrc, user_id, .. }
-            ) => {
+            Ctx::SpeakingStateUpdate( Speaking { ssrc, user_id, .. } ) => {
                 let ssrc_to_user_map = &mut self.lobby.1.lock().await;
                 if let Some(user_id) = user_id {
                     let id = user_id.0;
@@ -145,12 +143,8 @@ impl VoiceEventHandler for Receiver {
                 }
             }
 
-            _ => {
-                // We won't be registering this struct for any more event classes.
-                unimplemented!()
-            }
+            _ => unimplemented!()
         }
-
         None
     }
 }
@@ -166,14 +160,14 @@ struct General;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
-
     // Configure the client with your Discord bot token in the environment.
     let token = env::var("DISCORD_TOKEN")
         .expect("Expected a token in the environment");
 
-    let prefix = env::var("DISCORD_PREFIX")
-        .expect("Expected a prefix in the environment");
+    let prefix = match env::var("DISCORD_PREFIX") {
+        Ok(custom_prefix) => custom_prefix,
+        Err(_) => "$".to_string()
+    };
 
     let framework = StandardFramework::new()
         .configure(|c| c
@@ -262,9 +256,6 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
             // NOTE: this skips listening for the actual connection result.
             let mut handler = handler_lock.lock().await;
 
-            let _ = handler.deafen(true).await;
-            let _ = handler.mute(true).await;
-
             handler.add_global_event(
                 CoreEvent::VoicePacket.into(),
                 Receiver::new(lobby.clone()),
@@ -333,47 +324,53 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.expect("could not find guild from message");
     let members = guild.members;
     let guild_id = guild.id;
-    let directory = &format!(".temp_audio/{}", guild_id)[..];
-    if let Err(why) = std::fs::create_dir_all(directory) {
-        eprintln!("error: {}", why)
-    } else {
-        let data_read = ctx.data.read().await;
-        let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
-        if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
-            let mut lobby = lobby_lock.0.lock().await;
-            let ssrc_map = lobby_lock.1.lock().await;
-            for (id, buffer) in lobby.drain() {
-                if let Some(user_id) = ssrc_map.get(&id) {
-                    if let Some(member) = &members.get(user_id) {
-                        let name = member.user.name.clone();
-                        let mut process = match Command::new("ffmpeg")
-                            .args(&["-nostdin", "-f", "s16be", "-ac", "2", "-ar", "48k", "-i", "-", "-f", "mp3", "-b:a", "128k","-ac", "1", "-"])
-                            .stdin(Stdio::piped())
-                            .stdout(Stdio::piped())
-                            .spawn() {
-                            Err(why) => panic!("couldn't spawn ffmpeg: {}", why),
-                            Ok(process) => process,
-                        };
-                        let buffer = buffer.pop();
-                        let buffer= buffer.as_slice();
-                        match process.stdin.as_ref().unwrap().write_all(buffer) {
-                            Err(why) => panic!("couldn't write to stdin: {}", why),
-                            Ok(_) => {
-                                process.stdin.take().unwrap().flush()?;
-                                match process.wait_with_output() {
-                                    Err(why) => panic!("Process failed on wait: {}", why),
-                                    Ok(output) => {
-                                        let mp3_buffer = output.stdout.as_slice();
-                                        check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((mp3_buffer, &format!("{}.flac", &name)[..]))).await);
-                                    }
+    let global_data_read = ctx.data.read().await;
+    let lobbies_lock = global_data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
+    if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
+        let mut lobby = lobby_lock.0.lock().await;
+        let ssrc_map = lobby_lock.1.lock().await;
+        let output_format = &output_format()[..];
+        for (id, buffer) in lobby.drain() {
+            if let Some(user_id) = ssrc_map.get(&id) {
+                if let Some(member) = &members.get(user_id) {
+                    let name = member.user.name.clone();
+                    let mut process = match Command::new("ffmpeg")
+                        .args(
+                            &[
+                                "-f", "s16be", // format in input
+                                "-ac", "2", // audio channels in input
+                                "-ar", "48k", // audio rate
+                                "-i", "-", // input takes a pipe
+                                "-f", output_format, // output format
+                                "-b:a", "96k", // output rate
+                                "-ac", "2", // output audio channels
+                                "-" // output takes a pipe
+                            ])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .spawn() {
+                        Err(why) => panic!("couldn't spawn ffmpeg: {}", why),
+                        Ok(process) => process,
+                    };
+                    let buffer = buffer.pop();
+                    let buffer_slice = buffer.as_slice();
+                    match process.stdin.as_ref().unwrap().write_all(buffer_slice) {
+                        Err(why) => panic!("couldn't write to stdin: {}", why),
+                        Ok(_) => {
+                            process.stdin.take().unwrap().flush()?;
+                            match process.wait_with_output() {
+                                Err(why) => panic!("Process failed on wait: {}", why),
+                                Ok(output) => {
+                                    let mp3_buffer = output.stdout.as_slice();
+                                    check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((mp3_buffer, &format!("{}.flac", &name)[..]))).await);
                                 }
                             }
                         }
                     }
                 }
             }
-        };
-    }
+        }
+    };
     Ok(())
 }
 
@@ -406,4 +403,19 @@ fn get_bytes(origin: &Vec<i16>) -> Vec<u8> {
     let mut output = Vec::new();
     origin.iter().for_each(|&signal| signal.to_be_bytes().iter().for_each(|&byte| {output.push(byte)}));
     output
+}
+
+fn buffer_size () -> usize{
+    match env::var("DISCORD_BUFFER_SIZE") {
+        Ok(custom_size) => custom_size.parse::<usize>()
+            .expect("make sure the custom buffer is valid!"),
+        Err(_) => 2880000
+    }
+}
+
+fn output_format() -> String {
+    match env::var("DISCORD_OUTPUT_FORMAT") {
+        Ok(custom_format) => custom_format,
+        Err(_) => "ogg".to_string()
+    }
 }
