@@ -11,53 +11,46 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     sync::Arc,
+    io::Write,
+    process::{Command, Stdio}
 };
 
-use hound;
-
 use serenity::{
-    prelude::TypeMapKey,
     async_trait,
     client::{Client, Context, EventHandler},
     framework::{
         standard::{
-            CommandResult,
-            macros::{command, group, help, hook},
             Args,
             CommandGroup,
+            CommandResult,
             help_commands,
             HelpOptions,
+            macros::{command, group, help, hook},
         },
         StandardFramework,
     },
     model::{
         channel::Message,
-        gateway::{Ready, Activity},
+        gateway::{Activity, Ready},
         misc::Mentionable,
         prelude::{GuildId, UserId}
     },
+    prelude::TypeMapKey,
     Result as SerenityResult,
 };
-
 use songbird::{
     CoreEvent,
     driver::{Config as DriverConfig, DecodeMode},
     Event,
     EventContext,
     EventHandler as VoiceEventHandler,
-    model::payload::Speaking,
+    model::payload::{Speaking, ClientDisconnect},
     SerenityInit,
     Songbird,
 };
-use tokio::sync::{RwLock, Mutex};
+use tokio::sync::{Mutex, RwLock};
 
 const BUFFER_SIZE: usize = 2880000;
-const SPEC: hound::WavSpec = hound::WavSpec {
-    channels: 2,
-    sample_rate: 48000,
-    bits_per_sample: 16,
-    sample_format: hound::SampleFormat::Int,
-};
 
 struct Handler;
 
@@ -70,7 +63,7 @@ impl EventHandler for Handler {
 }
 
 struct Buffer {
-    buf: Vec<i16>,
+    buf: Vec<u8>,
     pos: usize,
 }
 
@@ -82,14 +75,14 @@ impl Buffer {
         }
     }
 
-    fn push(&mut self, val: &Vec<i16>) {
-        for bits in val {
+    fn push(&mut self, val: Vec<u8>) {
+        for byte in val {
             self.pos = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
-            self.buf[self.pos] = *bits;
+            self.buf[self.pos] = byte;
         }
     }
 
-    fn pop(&self) -> Vec<i16> {
+    fn pop(&self) -> Vec<u8> {
         let start = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
         [&self.buf[start..], &self.buf[..start]].concat()
     }
@@ -115,35 +108,47 @@ impl TypeMapKey for Lobbies {
 
 #[async_trait]
 impl VoiceEventHandler for Receiver {
-    #[allow(unused_variables)]
     async fn act(&self, ctx: &EventContext<'_>) -> Option<Event> {
         use EventContext as Ctx;
         match ctx {
-            Ctx::VoicePacket { audio, packet, payload_offset, payload_end_pad } => {
+            Ctx::VoicePacket { audio, packet, .. } => {
                 // An event which fires for every received audio packet,
                 // containing the decoded data.
                 if let Some(audio) = audio {
                     let buffer = &mut self.lobby.0.lock().await;
                     if let Some(buffer) = buffer.get_mut(&packet.ssrc) {
-                        buffer.push(audio);
+                        buffer.push(get_bytes(audio));
                     } else {
                         let mut new_buffer = Buffer::new();
-                        new_buffer.push(audio);
+                        new_buffer.push(get_bytes(audio));
                         buffer.insert(packet.ssrc, new_buffer);
                     }
                 }
             }
+
             Ctx::SpeakingStateUpdate(
-                Speaking { speaking, ssrc, user_id, .. }
+                Speaking { ssrc, user_id, .. }
             ) => {
                 // You can implement your own logic here to handle a user who has joined the
                 // voice channel e.g., allocate structures, map their SSRC to User ID.
-                let buffer = &mut self.lobby.1.lock().await;
+                let ssrc_to_user_map = &mut self.lobby.1.lock().await;
                 if let Some(user_id) = user_id {
                     let id = user_id.0;
-                    buffer.insert(*ssrc, UserId(id));
+                    ssrc_to_user_map.insert(*ssrc, UserId(id));
                 }
             }
+
+            Ctx::ClientDisconnect(ClientDisconnect {user_id, .. }) => {
+                let ssrc_to_user_map = &mut self.lobby.1.lock().await;
+                // loops the entire buffer in case the ssrc changed midway through
+                for (mapped_ssrc, mapped_user_id) in ssrc_to_user_map.iter() {
+                    if mapped_user_id.0 == user_id.0 {
+                        let audio_buffer = &mut self.lobby.0.lock().await;
+                        audio_buffer.remove(mapped_ssrc);
+                    }
+                }
+            }
+
             _ => {
                 // We won't be registering this struct for any more event classes.
                 unimplemented!()
@@ -274,6 +279,11 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
                 Receiver::new(lobby.clone()),
             );
 
+            handler.add_global_event(
+                CoreEvent::ClientDisconnect.into(),
+                Receiver::new(lobby.clone()),
+            );
+
             check_msg(msg.channel_id.say(&ctx.http, &format!("Joined {}", channel_id.mention())).await);
         } else {
             check_msg(msg.channel_id.say(&ctx.http, "Error joining the channel").await);
@@ -340,18 +350,27 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
                 if let Some(user_id) = ssrc_map.get(&id) {
                     if let Some(member) = &members.get(user_id) {
                         let name = member.user.name.clone();
-                        let path = format!("{}/audio.wav", directory);
-                        let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
-                        let mut writer = writer.get_i16_writer(BUFFER_SIZE as u32);
-                        //let mut writer = hound::WavWriter::create(&path, SPEC).unwrap();
-                        for sample in buffer.pop().iter() {
-                            writer.write_sample(*sample);
-                        }
-                        if let Err(_) = writer.flush() {
-                            check_msg(msg.channel_id.send_message(ctx, |m| m.content("There was an error in the creation of {}.wav. I'm sorry")).await);
-                        } else {
-                            if let Ok(file) = tokio::fs::File::open(&path).await {
-                                check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((&file, &format!("{}.wav", &name)[..]))).await);
+                        let mut process = match Command::new("ffmpeg")
+                            .args(&["-nostdin", "-y", "-f", "s16be", "-ac", "2", "-ar", "48k", "-i", "-", "-f", "opus", "-ac", "1", "-"])
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .spawn() {
+                            Err(why) => panic!("couldn't spawn ffmpeg: {}", why),
+                            Ok(process) => process,
+                        };
+                        let buffer = buffer.pop();
+                        let buffer= buffer.as_slice();
+                        match process.stdin.as_ref().unwrap().write_all(buffer) {
+                            Err(why) => panic!("couldn't write to stdin: {}", why),
+                            Ok(_) => {
+                                process.stdin.take().unwrap().flush()?;
+                                match process.wait_with_output() {
+                                    Err(why) => panic!("Process failed on wait: {}", why),
+                                    Ok(output) => {
+                                        let mp3_buffer = output.stdout.as_slice();
+                                        check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((mp3_buffer, &format!("{}.ogg", &name)[..]))).await);
+                                    }
+                                }
                             }
                         }
                     }
@@ -385,4 +404,10 @@ fn check_msg(result: SerenityResult<Message>) {
     if let Err(why) = result {
         println!("Error sending message: {:?}", why);
     }
+}
+
+fn get_bytes(origin: &Vec<i16>) -> Vec<u8> {
+    let mut output = Vec::new();
+    origin.iter().for_each(|&signal| signal.to_be_bytes().iter().for_each(|&byte| {output.push(byte)}));
+    output
 }
