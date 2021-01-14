@@ -343,7 +343,7 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
                                 "-i", "-", // input takes a pipe
                                 "-f", output_format, // output format
                                 "-b:a", "96k", // output rate
-                                "-ac", "2", // output audio channels
+                                "-ac", "1", // output audio channels
                                 "-" // output takes a pipe
                             ])
                         .stdin(Stdio::piped())
@@ -362,7 +362,7 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
                                 Err(why) => panic!("Process failed on wait: {}", why),
                                 Ok(output) => {
                                     let mp3_buffer = output.stdout.as_slice();
-                                    check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((mp3_buffer, &format!("{}.flac", &name)[..]))).await);
+                                    check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((mp3_buffer, &format!("{}.{}", &name, output_format)[..]))).await);
                                 }
                             }
                         }
