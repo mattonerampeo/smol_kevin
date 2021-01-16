@@ -10,9 +10,8 @@
 use std::{
     collections::{HashMap, HashSet},
     env,
+    process::Stdio,
     sync::Arc,
-    io::Write,
-    process::{Stdio}
 };
 
 use serenity::{
@@ -33,7 +32,7 @@ use serenity::{
         channel::Message,
         gateway::{Activity, Ready},
         misc::Mentionable,
-        prelude::{GuildId, UserId}
+        prelude::{GuildId, UserId},
     },
     prelude::TypeMapKey,
     Result as SerenityResult,
@@ -44,14 +43,16 @@ use songbird::{
     Event,
     EventContext,
     EventHandler as VoiceEventHandler,
-    model::payload::{Speaking, ClientDisconnect},
+    model::payload::{ClientDisconnect, Speaking},
     SerenityInit,
     Songbird,
 };
-use tokio::sync::{Mutex, RwLock};
-use tokio::io::{BufWriter, AsyncWriteExt, AsyncReadExt};
-use tokio::process::{Command};
-use tokio::fs::File;
+use tokio::{
+    io::AsyncWriteExt,
+    process::Command,
+    spawn as thread_spawn,
+    sync::{Mutex, RwLock},
+};
 
 const BUFFER_SIZE: usize = 2880000;
 
@@ -60,7 +61,8 @@ struct Handler;
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
-        ctx.shard.set_activity(Some(Activity::playing("#help")));
+        let prefix = bot_prefix();
+        ctx.shard.set_activity(Some(Activity::playing(&format!("{}help", prefix)[..])));
         println!("{} is connected!", ready.user.name);
     }
 }
@@ -72,21 +74,22 @@ struct Buffer {
 
 impl Buffer {
     fn new() -> Self {
+        let size = buffer_size();
         Self {
-            buf: vec![0; BUFFER_SIZE],
-            pos: BUFFER_SIZE,
+            buf: vec![0; size],
+            pos: 0,
         }
     }
 
     fn push(&mut self, val: &Vec<i16>) {
         for bytes in val {
-            self.pos = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
             self.buf[self.pos] = *bytes;
+            self.pos = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
         }
     }
 
     fn pop(&self) -> Vec<i16> {
-        let start = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
+        let start = if self.pos < BUFFER_SIZE - 1 { self.pos } else { 0 };
         [&self.buf[start..], &self.buf[..start]].concat()
     }
 }
@@ -141,7 +144,7 @@ impl VoiceEventHandler for Receiver {
                 }
             }
 
-            Ctx::ClientDisconnect(ClientDisconnect {user_id, .. }) => {
+            Ctx::ClientDisconnect(ClientDisconnect { user_id, .. }) => {
                 let ssrc_to_user_map = &mut self.lobby.1.lock().await;
                 // loops the entire buffer in case the ssrc changed midway through
                 for (mapped_ssrc, mapped_user_id) in ssrc_to_user_map.iter() {
@@ -173,17 +176,14 @@ struct General;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
-
-    // Configure the client with your Discord bot token in the environment.
-    let token = env::var("DISCORD_TOKEN")
-        .expect("Expected a token in the environment");
+    let token = discord_token();
+    let prefix = bot_prefix();
 
     let framework = StandardFramework::new()
         .configure(|c| c
             .ignore_bots(true)
             .with_whitespace(true)
-            .prefix(".."))
+            .prefix(&prefix[..]))
         .group(&GENERAL_GROUP)
         .after(after)
         .help(&MY_HELP);
@@ -253,7 +253,6 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
         let (handler_lock, conn_result) = manager.join(guild_id, channel_id).await;
 
         if let Ok(_) = conn_result {
-
             let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
             let ssrc_map: HashMap<u32, UserId> = HashMap::new();
             let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
@@ -291,7 +290,7 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
 
         Ok(())
     } else {
-        check_msg(msg.reply(&ctx, "not in a voice channel").await);
+        check_msg(msg.channel_id.say(&ctx.http, "User is not in a voice channel").await);
         Ok(())
     }
 }
@@ -337,40 +336,49 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.expect("could not find guild from message");
     let members = guild.members;
     let guild_id = guild.id;
-        let data_read = ctx.data.read().await;
-        let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
-        let path_for_temp_audio = &format!(".temp/{}.pcm", guild_id)[..];
-        if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
-            let mut lobby = lobby_lock.0.lock().await;
-            let ssrc_map = lobby_lock.1.lock().await;
-            for (id, buffer) in lobby.drain() {
-                if let Some(user_id) = ssrc_map.get(&id) {
-                    if let Some(member) = &members.get(user_id) {
-                        let buffer = buffer.pop();
-                        let samples = get_bytes(&buffer);
-                        let mut file = File::create(path_for_temp_audio).await?;
-                        file.write_all(&*samples).await?;
-                        file.flush();
-                        drop(file);
-                        let name = member.user.name.clone();
-                        let mut audio_encoded = match Command::new("ffmpeg")
-                            .args(&["-nostdin", "-y", "-f", "s16be", "-channels", "2", "-sample_rate", "48000", "-i", path_for_temp_audio, "-f", "ogg", "-" ])
-                            .stdin(Stdio::null())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::null())
-                            .output().await {
-                            Err(why) => panic!("couldn't spawn ffmpeg: {}", why),
-                            Ok(output) => output,
-                        };
+    let data_read = ctx.data.read().await;
+    let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
+    if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
+        let lobby = lobby_lock.0.lock().await;
+        let ssrc_map = lobby_lock.1.lock().await;
+        let mut encoded_buffers = Vec::<(Vec<u8>, String)>::new();
+        let output_format = &output_format()[..];
+        for (id, buffer) in lobby.iter() {
+            if let Some(user_id) = ssrc_map.get(&id) {
+                if let Some(member) = &members.get(user_id) {
+                    let buffer = buffer.pop();
+                    let samples = get_bytes(&buffer);
+                    let name = member.user.name.clone();
+                    let mut child = Command::new("ffmpeg")
+                        .args(
+                            &[
+                                "-f", "s16be", // format in input
+                                "-ac", "2", // audio channels in input
+                                "-ar", "48k", // audio rate
+                                "-i", "-", // input takes a pipe
+                                "-f", output_format, // output format
+                                "-b:a", "96k", // output rate
+                                "-ac", "2", // output audio channels
+                                "-" // output takes a pipe
+                            ])
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::null())
+                        .spawn().expect("could not spawn encoder");
 
-                               check_msg(msg.channel_id.send_message(ctx, |m| m.add_file((audio_encoded.stdout.as_slice(), &format!("{}.ogg", &name)[..]))).await);
-
-
-                    }
+                    let mut stdin = child.stdin.take().expect("failed to open stdin");
+                    thread_spawn(async move {
+                        stdin.write_all(&samples[..]).await.unwrap();
+                    });
+                    let encoded = child.wait_with_output().await?.stdout;
+                    encoded_buffers.push((encoded, format!("{}.{}", name, output_format)));
                 }
+            }
         };
+        let encoded_buffers_slices = encoded_buffers.iter()
+            .map(|(audio, name)| (audio.as_slice(), name.as_str())).collect::<Vec<_>>();
+        check_msg(msg.channel_id.send_message(ctx, |m| m.add_files(encoded_buffers_slices).content("Here's what you asked for!")).await);
     }
-    check_msg(msg.reply(ctx, "done").await);
     Ok(())
 }
 
@@ -401,6 +409,33 @@ fn check_msg(result: SerenityResult<Message>) {
 
 fn get_bytes(origin: &Vec<i16>) -> Vec<u8> {
     let mut output = Vec::new();
-    origin.iter().for_each(|&signal| signal.to_be_bytes().iter().for_each(|&byte| {output.push(byte)}));
+    origin.iter().for_each(|&signal| signal.to_be_bytes().iter().for_each(|&byte| { output.push(byte) }));
     output
+}
+
+fn buffer_size () -> usize{
+    match env::var("DISCORD_BUFFER_SIZE") {
+        Ok(custom_size) => custom_size.parse::<usize>()
+            .expect("make sure the custom buffer is valid!"),
+        Err(_) => 2880000
+    }
+}
+
+fn output_format() -> String {
+    match env::var("DISCORD_OUTPUT_FORMAT") {
+        Ok(custom_format) => custom_format,
+        Err(_) => "ogg".to_string()
+    }
+}
+
+fn discord_token() -> String {
+    env::var("DISCORD_TOKEN")
+        .expect("Expected a token in the environment")
+}
+
+fn bot_prefix() -> String {
+    match env::var("DISCORD_PREFIX") {
+        Ok(custom_prefix) => custom_prefix,
+        Err(_) => "?".to_string()
+    }
 }
