@@ -1,9 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    process::Stdio,
-    sync::Arc,
-};
+use std::{collections::{HashMap, HashSet}, env, process::Stdio, sync::Arc};
 use serenity::{
     async_trait,
     client::{Client, Context, EventHandler},
@@ -41,8 +36,8 @@ use songbird::{
 use tokio::{
     io::AsyncWriteExt,
     process::Command,
-    spawn as thread_spawn,
     sync::{Mutex, RwLock},
+    task,
 };
 
 struct Handler;
@@ -327,48 +322,58 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
     let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
     if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
         let dump_started_message = msg.channel_id.send_message(ctx, |m|
-            m.content("starting a dump. Might take a while!")
+            m.content("starting to dump. Might take a while!")
         ).await;
         if let Ok(message_to_remove) = dump_started_message {
             let lobby = lobby_lock.0.lock().await;
             let ssrc_map = lobby_lock.1.lock().await;
-            let mut encoded_buffers = Vec::<(Vec<u8>, String)>::new();
-            let output_format = &output_format()[..];
+            let encoded_buffers = Arc::new(Mutex::new(Vec::<(Vec<u8>, String)>::new()));
+            let mut encoding_threads = Vec::new();
+            let output_format = output_format();
             let typing = msg.channel_id.start_typing(ctx.as_ref())?;
             for (id, buffer) in lobby.iter() {
                 if let Some(user_id) = ssrc_map.get(&id) {
                     if let Some(member) = &members.get(user_id) {
                         let buffer = buffer.pop();
-                        let samples = get_bytes(&buffer);
                         let name = member.user.name.clone();
-                        let mut child = Command::new("ffmpeg")
-                            .args(
-                                &[
-                                    "-f", "s16be", // format in input
-                                    "-ac", "2", // audio channels in input
-                                    "-ar", "48k", // audio rate
-                                    "-i", "-", // input takes a pipe
-                                    "-f", output_format, // output format
-                                    "-b:a", "96k", // output rate
-                                    "-ac", "2", // output audio channels
-                                    "-" // output takes a pipe
-                                ])
-                            .stdin(Stdio::piped())
-                            .stdout(Stdio::piped())
-                            .stderr(Stdio::null())
-                            .spawn().expect("could not spawn encoder");
+                        let encoded_buffers = encoded_buffers.clone();
+                        let output_format = output_format.clone();
+                        encoding_threads.push(
+                            task::spawn(async move {
+                            let mut child = Command::new("ffmpeg")
+                                .args(
+                                    &[
+                                        "-f", "s16be", // format in input
+                                        "-ac", "2", // audio channels in input
+                                        "-ar", "48k", // audio rate
+                                        "-i", "-", // input takes a pipe
+                                        "-f", &output_format[..], // output format
+                                        "-b:a", "96k", // output rate
+                                        "-ac", "2", // output audio channels
+                                        "-" // output takes a pipe
+                                    ])
+                                .stdin(Stdio::piped())
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::null())
+                                .spawn().expect("could not spawn encoder");
 
-                        let mut stdin = child.stdin.take().expect("failed to open stdin");
-                        thread_spawn(async move {
-                            stdin.write_all(&samples[..]).await.unwrap();
-                        });
-                        let encoded = child.wait_with_output().await?.stdout;
-                        encoded_buffers.push((encoded, format!("{}.{}", name, output_format)));
+                            let samples = get_bytes(&buffer);
+                            let mut stdin = child.stdin.take().expect("failed to open stdin");
+                            task::spawn(async move {
+                                stdin.write_all(&samples[..]).await.unwrap();
+                            });
+                            let encoded = child.wait_with_output().await.unwrap().stdout;
+                            encoded_buffers.lock().await.push((encoded, format!("{}.{}", name, output_format)));
+                        }));
                     }
                 }
             };
+
+            for handle in encoding_threads.drain(..) {
+                handle.await?;
+            }
             typing.stop();
-            send_files_embed_on_channel(ctx, msg.channel_id, "Here's what you asked for!", encoded_buffers).await;
+            send_files_embed_on_channel(ctx, msg.channel_id, "Here's what you asked for!", &*encoded_buffers.lock().await).await;
             message_to_remove.delete(ctx).await?;
         }
     }
@@ -404,7 +409,7 @@ async fn send_msg_embed_on_channel (ctx: &Context, channel_id: ChannelId, messag
     check_msg(channel_id.send_message(ctx, |m| m.embed(|m| m.description(message_content))).await);
 }
 
-async fn send_files_embed_on_channel (ctx: &Context, channel_id: ChannelId, message_content: &str, files: Vec<(Vec<u8>, String)>) {
+async fn send_files_embed_on_channel (ctx: &Context, channel_id: ChannelId, message_content: &str, files: &Vec<(Vec<u8>, String)>) {
     let files_with_references = files.iter()
         .map(|(audio, name)| (&audio[..], &name[..])).collect::<Vec<_>>();
     check_msg(channel_id.send_message(ctx, |m| m.add_files(files_with_references).embed(|m| m.description(message_content))).await);
