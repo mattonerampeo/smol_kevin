@@ -1,19 +1,9 @@
-//! Requires the "client", "standard_framework", and "voice" features be enabled
-//! in your Cargo.toml, like so:
-//!
-//! ```toml
-//! [dependencies.serenity]
-//! git = "https://github.com/serenity-rs/serenity.git"
-//! features = ["client", "standard_framework", "voice"]
-//! ```
-
 use std::{
     collections::{HashMap, HashSet},
     env,
     process::Stdio,
     sync::Arc,
 };
-
 use serenity::{
     async_trait,
     client::{Client, Context, EventHandler},
@@ -29,6 +19,7 @@ use serenity::{
         StandardFramework,
     },
     model::{
+        id::ChannelId,
         channel::Message,
         gateway::{Activity, Ready},
         misc::Mentionable,
@@ -53,8 +44,6 @@ use tokio::{
     spawn as thread_spawn,
     sync::{Mutex, RwLock},
 };
-
-const BUFFER_SIZE: usize = 2880000;
 
 struct Handler;
 
@@ -82,14 +71,16 @@ impl Buffer {
     }
 
     fn push(&mut self, val: &Vec<i16>) {
+        let size = buffer_size();
         for bytes in val {
             self.buf[self.pos] = *bytes;
-            self.pos = if self.pos < BUFFER_SIZE - 1 { self.pos + 1 } else { 0 };
+            self.pos = if self.pos < size - 1 { self.pos + 1 } else { 0 };
         }
     }
 
     fn pop(&self) -> Vec<i16> {
-        let start = if self.pos < BUFFER_SIZE - 1 { self.pos } else { 0 };
+        let size = buffer_size();
+        let start = if self.pos < size - 1 { self.pos } else { 0 };
         [&self.buf[start..], &self.buf[..start]].concat()
     }
 }
@@ -282,15 +273,14 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
                 CoreEvent::ClientDisconnect.into(),
                 Receiver::new(lobby.clone()),
             );
-
-            check_msg(msg.channel_id.say(&ctx.http, &format!("Joined {}", channel_id.mention())).await);
+            send_msg_embed_on_channel(ctx, msg.channel_id, &format!("Joined {}", channel_id.mention())[..]).await;
         } else {
-            check_msg(msg.channel_id.say(&ctx.http, "Error joining the channel").await);
+            send_msg_embed_on_channel(ctx, msg.channel_id, "Error joining the channel").await;
         }
 
         Ok(())
     } else {
-        check_msg(msg.channel_id.say(&ctx.http, "User is not in a voice channel").await);
+        send_msg_embed_on_channel(ctx, msg.channel_id, "User is not in a voice channel").await;
         Ok(())
     }
 }
@@ -302,18 +292,15 @@ async fn join(ctx: &Context, msg: &Message) -> CommandResult {
 async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
     let guild = msg.guild(&ctx.cache).await.unwrap();
     let guild_id = guild.id;
-
     let manager = songbird::get(ctx).await
         .expect("Songbird Voice client placed in at initialisation.").clone();
-
     if let Some(_) = manager.get(guild_id) {
         if let Err(e) = manager.remove(guild_id).await {
-            check_msg(msg.channel_id.say(&ctx.http, format!("Failed: {:?}", e)).await);
+            eprintln!("Failed: {:?}", e);
         }
-
-        check_msg(msg.channel_id.say(&ctx.http, "Left voice channel").await);
+        send_msg_embed_on_channel(ctx, msg.channel_id, "Left voice channel").await;
     } else {
-        check_msg(msg.reply(ctx, "Not in a voice channel").await);
+        send_msg_embed_on_channel(ctx, msg.channel_id, "Not in a voice channel").await;
     }
 
     // to prevent poison errors, whenever the bot leaves it deletes the buffer for the server
@@ -321,7 +308,7 @@ async fn leave(ctx: &Context, msg: &Message) -> CommandResult {
         let data_write = ctx.data.write().await;
         let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
         if let Some(_) = buffers_lock.write().await.remove(&guild_id) {
-            check_msg(msg.channel_id.say(&ctx.http, "Audio buffer has been deleted.").await);
+            send_msg_embed_on_channel(ctx, msg.channel_id, "Audio buffer has been deleted.").await;
         };
     }
 
@@ -339,45 +326,51 @@ async fn dump(ctx: &Context, msg: &Message) -> CommandResult {
     let data_read = ctx.data.read().await;
     let lobbies_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
     if let Some(lobby_lock) = lobbies_lock.read().await.get(&guild_id).clone() {
-        let lobby = lobby_lock.0.lock().await;
-        let ssrc_map = lobby_lock.1.lock().await;
-        let mut encoded_buffers = Vec::<(Vec<u8>, String)>::new();
-        let output_format = &output_format()[..];
-        for (id, buffer) in lobby.iter() {
-            if let Some(user_id) = ssrc_map.get(&id) {
-                if let Some(member) = &members.get(user_id) {
-                    let buffer = buffer.pop();
-                    let samples = get_bytes(&buffer);
-                    let name = member.user.name.clone();
-                    let mut child = Command::new("ffmpeg")
-                        .args(
-                            &[
-                                "-f", "s16be", // format in input
-                                "-ac", "2", // audio channels in input
-                                "-ar", "48k", // audio rate
-                                "-i", "-", // input takes a pipe
-                                "-f", output_format, // output format
-                                "-b:a", "96k", // output rate
-                                "-ac", "2", // output audio channels
-                                "-" // output takes a pipe
-                            ])
-                        .stdin(Stdio::piped())
-                        .stdout(Stdio::piped())
-                        .stderr(Stdio::null())
-                        .spawn().expect("could not spawn encoder");
+        let dump_started_message = msg.channel_id.send_message(ctx, |m|
+            m.content("starting a dump. Might take a while!")
+        ).await;
+        if let Ok(message_to_remove) = dump_started_message {
+            let lobby = lobby_lock.0.lock().await;
+            let ssrc_map = lobby_lock.1.lock().await;
+            let mut encoded_buffers = Vec::<(Vec<u8>, String)>::new();
+            let output_format = &output_format()[..];
+            let typing = msg.channel_id.start_typing(ctx.as_ref())?;
+            for (id, buffer) in lobby.iter() {
+                if let Some(user_id) = ssrc_map.get(&id) {
+                    if let Some(member) = &members.get(user_id) {
+                        let buffer = buffer.pop();
+                        let samples = get_bytes(&buffer);
+                        let name = member.user.name.clone();
+                        let mut child = Command::new("ffmpeg")
+                            .args(
+                                &[
+                                    "-f", "s16be", // format in input
+                                    "-ac", "2", // audio channels in input
+                                    "-ar", "48k", // audio rate
+                                    "-i", "-", // input takes a pipe
+                                    "-f", output_format, // output format
+                                    "-b:a", "96k", // output rate
+                                    "-ac", "2", // output audio channels
+                                    "-" // output takes a pipe
+                                ])
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::null())
+                            .spawn().expect("could not spawn encoder");
 
-                    let mut stdin = child.stdin.take().expect("failed to open stdin");
-                    thread_spawn(async move {
-                        stdin.write_all(&samples[..]).await.unwrap();
-                    });
-                    let encoded = child.wait_with_output().await?.stdout;
-                    encoded_buffers.push((encoded, format!("{}.{}", name, output_format)));
+                        let mut stdin = child.stdin.take().expect("failed to open stdin");
+                        thread_spawn(async move {
+                            stdin.write_all(&samples[..]).await.unwrap();
+                        });
+                        let encoded = child.wait_with_output().await?.stdout;
+                        encoded_buffers.push((encoded, format!("{}.{}", name, output_format)));
+                    }
                 }
-            }
-        };
-        let encoded_buffers_slices = encoded_buffers.iter()
-            .map(|(audio, name)| (audio.as_slice(), name.as_str())).collect::<Vec<_>>();
-        check_msg(msg.channel_id.send_message(ctx, |m| m.add_files(encoded_buffers_slices).content("Here's what you asked for!")).await);
+            };
+            typing.stop();
+            send_files_embed_on_channel(ctx, msg.channel_id, "Here's what you asked for!", encoded_buffers).await;
+            message_to_remove.delete(ctx).await?;
+        }
     }
     Ok(())
 }
@@ -396,7 +389,7 @@ async fn clean(ctx: &Context, msg: &Message) -> CommandResult {
         let buffer = &mut lobby_lock.0.lock().await;
         buffer.clear();
     }
-    check_msg(msg.channel_id.send_message(ctx, |m| m.content("The buffer has been cleared. No need to thank me")).await);
+    send_msg_embed_on_channel(ctx, msg.channel_id, "The buffer has been cleared. No need to thank me").await;
     Ok(())
 }
 
@@ -405,6 +398,16 @@ fn check_msg(result: SerenityResult<Message>) {
     if let Err(why) = result {
         println!("Error sending message: {:?}", why);
     }
+}
+
+async fn send_msg_embed_on_channel (ctx: &Context, channel_id: ChannelId, message_content: &str) {
+    check_msg(channel_id.send_message(ctx, |m| m.embed(|m| m.description(message_content))).await);
+}
+
+async fn send_files_embed_on_channel (ctx: &Context, channel_id: ChannelId, message_content: &str, files: Vec<(Vec<u8>, String)>) {
+    let files_with_references = files.iter()
+        .map(|(audio, name)| (&audio[..], &name[..])).collect::<Vec<_>>();
+    check_msg(channel_id.send_message(ctx, |m| m.add_files(files_with_references).embed(|m| m.description(message_content))).await);
 }
 
 fn get_bytes(origin: &Vec<i16>) -> Vec<u8> {
@@ -417,7 +420,7 @@ fn buffer_size () -> usize{
     match env::var("DISCORD_BUFFER_SIZE") {
         Ok(custom_size) => custom_size.parse::<usize>()
             .expect("make sure the custom buffer is valid!"),
-        Err(_) => 2880000
+        Err(_) => 1440000
     }
 }
 
