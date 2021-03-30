@@ -167,8 +167,8 @@ pub async fn dump(ctx: &Context, response: Response) {
         for handle in encoding_threads.drain(..) {
             handle.await.unwrap();
         }
-        //response.delete(ctx);
-        response.follow_up_files(ctx, "Done!", &*encoded_buffers.lock().await).await;
+        response.edit(ctx, "Done!").await;
+        response.follow_up_files(ctx, &*encoded_buffers.lock().await).await;
     };
 }
 

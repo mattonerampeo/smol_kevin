@@ -127,7 +127,7 @@ impl Response {
         }).await)
     }
 
-    pub async fn follow_up_files(&self, ctx: &Context, message_content: &str, files: &Vec<(Vec<u8>, String)>) {
+    pub async fn follow_up_files(&self, ctx: &Context, files: &Vec<(Vec<u8>, String)>) {
         /*
             let files_with_references = files.iter()
             .map(|(audio, name)| (&audio[..], &name[..])).collect::<Vec<_>>();
@@ -137,13 +137,13 @@ impl Response {
                 .embed(|m| m.description(message_content))
             }).await)
          */
-        self.send_files_embed_on_channel(ctx, message_content, files).await
+        self.send_files_embed_on_channel(ctx, files).await
     }
 
-    async fn send_files_embed_on_channel (&self, ctx: &Context, message_content: &str, files: &Vec<(Vec<u8>, String)>) {
+    async fn send_files_embed_on_channel (&self, ctx: &Context, files: &Vec<(Vec<u8>, String)>) {
         let files_with_references = files.iter()
             .map(|(audio, name)| (&audio[..], &name[..])).collect::<Vec<_>>();
-        check(self.interaction.channel_id.send_message(ctx, |m| m.add_files(files_with_references).embed(|m| m.description(message_content))).await);
+        check(self.interaction.channel_id.send_message(ctx, |m| m.add_files(files_with_references)).await);
     }
 }
 
