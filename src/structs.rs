@@ -19,6 +19,7 @@ use serenity::{
     client::Context,
     prelude::TypeMapKey,
 };
+use std::collections::HashSet;
 
 pub struct Buffer {
     buf: Vec<i16>,
@@ -65,6 +66,12 @@ pub struct Lobbies; // void struct used to generate a typemap that holds all act
 
 impl TypeMapKey for Lobbies {
     type Value = Arc<RwLock<HashMap<GuildId, Arc<(Mutex<HashMap<u32, Buffer>>, Mutex<HashMap<u32, UserId>>)>>>>; // a game is held within a lobby. the text channel id is the lobby's unique code
+}
+
+pub struct Flags; // void struct used to generate a typemap that holds all active lobbies
+
+impl TypeMapKey for Flags {
+    type Value = Arc<Mutex<HashSet<GuildId>>>; // a game is held within a lobby. the text channel id is the lobby's unique code
 }
 
 fn buffer_size () -> usize {

@@ -38,9 +38,13 @@ use songbird::{
 };
 use tokio::{
     sync::RwLock,
+    sync::Mutex,
 };
 use dotenv;
 use crate::structs::*;
+use serenity::model::id::GuildId;
+use serenity::model::prelude::VoiceState;
+use std::collections::HashSet;
 
 struct Handler;
 
@@ -49,12 +53,18 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         ctx.shard.set_activity(Some(Activity::listening("...YOU...")));
         let application_id = ready.application.id.0; // usually this will be the bot's UserId
+        let existing_commands = ctx.http.get_global_application_commands(application_id).await.unwrap();
+        let existing_commands_set: HashSet<String> = existing_commands.iter().map(|command| command.name.clone()).collect();
 
         let new_interaction = |name: String, description: String| async {
-            let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
-                a.name(name)
-                    .description(description)
-            }).await;
+            if existing_commands_set.contains(&name) == false {
+                let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
+                    a.name(name)
+                        .description(description)
+                }).await;
+            } else {
+                eprintln!("Skipping {} as it's already registered", name)
+            }
         };
 
         new_interaction(String::from("dump"), String::from("Dumps the audio buffer for the current channel in chat.")).await;
@@ -80,8 +90,27 @@ impl EventHandler for Handler {
                 .description("Make the bot leave your voice channel.")
         }).await;
          */
+
         println!("{} is online!", ready.user.name);
     }
+    async fn voice_state_update(&self, ctx: Context, guild_id: Option<GuildId>, old: Option<VoiceState>, new: VoiceState) {
+        if new.user_id == ctx.cache.current_user_id().await {
+            let data_read = ctx.data.read().await;
+            let flags = data_read.get::<Flags>().expect("Typemap incomplete").clone();
+            let mut flags = flags.lock().await;
+            let guild_id = guild_id.unwrap();
+            if flags.remove(&guild_id) == false {
+                println!("reconnecting");
+                if let Some(old_vs) = old {
+                    flags.insert(guild_id);
+                    let manager = songbird::get(&ctx).await
+                        .expect("Could not get manager connection.").clone();
+                    let _ = manager.join(guild_id, old_vs.channel_id.unwrap()).await;
+                }
+            }
+        }
+    }
+
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
         if let Ok(response) = Response::new(&ctx, interaction).await {
             match response.data() {
@@ -96,6 +125,7 @@ impl EventHandler for Handler {
             }
         }
     }
+
 }
 
 #[async_trait]
@@ -173,6 +203,7 @@ async fn main() {
     {
         let mut data = client.data.write().await;
         data.insert::<Lobbies>(Arc::new(RwLock::new(HashMap::default())));
+        data.insert::<Flags>(Arc::new(Mutex::new(HashSet::new())));
     }
 
     let _ = client.start().await.map_err(|why| println!("Client ended: {:?}", why));

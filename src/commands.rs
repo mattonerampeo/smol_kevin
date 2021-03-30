@@ -30,6 +30,8 @@ pub async fn join(ctx: &Context, response: Response) {
             response.edit(ctx, "Error: you first need to be in a voice channel").await;
         }
         Some(user_channel_id) => {
+            let data_read = ctx.data.read().await;
+            let _ = data_read.get::<Flags>().expect("Typemap incomplete").clone().lock().await.insert(guild_id);
             if let Some(current_channel_id) = guild.voice_states.get(&ctx.cache.current_user_id().await).and_then(|vs| vs.channel_id) {
                 if current_channel_id == user_channel_id {
                     response.edit(ctx, "Error: the bot is already in your voice channel.").await;
@@ -45,11 +47,8 @@ pub async fn join(ctx: &Context, response: Response) {
                 let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
                 let ssrc_map: HashMap<u32, UserId> = HashMap::new();
                 let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
-                {
-                    let data_write = ctx.data.write().await;
-                    let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
-                    buffers_lock.write().await.insert(guild_id, lobby.clone());
-                }
+                let buffers_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
+                buffers_lock.write().await.insert(guild_id, lobby.clone());
 
                 // NOTE: this skips listening for the actual connection result.
                 let mut handler = handler_lock.lock().await;
@@ -103,10 +102,11 @@ pub async fn leave(ctx: &Context, response: Response) {
             }
             // to prevent poison errors, whenever the bot leaves it deletes the buffer for the server
             {
-                let data_write = ctx.data.write().await;
-                let buffers_lock = data_write.get::<Lobbies>().expect("Typemap incomplete").clone();
+                let data_read = ctx.data.read().await;
+                let _ = data_read.get::<Flags>().expect("Typemap incomplete").clone().lock().await.insert(guild_id);
+                let buffers_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
                 buffers_lock.write().await.remove(&guild_id);
-            }
+            };
         } else {
             response.edit(ctx, "Error: You have to be in the same channel as the bot to remove it").await;
         }
