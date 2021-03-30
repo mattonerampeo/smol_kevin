@@ -9,6 +9,7 @@ edition = "2018"
 songbird = "0.1.0"
 discortp = "0.2"
 dotenv = "0.15.0"
+chrono = "0.4.19"
 
 [dependencies.serenity]
 version = "0.10.4"

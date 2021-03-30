@@ -1,22 +1,38 @@
 mod commands;
 mod structs;
 
-use std::{collections::HashMap, env, sync::Arc};
+use std::{
+    collections::HashMap,
+    env,
+    sync::Arc};
 use serenity::{
     async_trait,
-    client::{Client, Context, EventHandler},
+    client::{
+        Client,
+        Context,
+        EventHandler
+    },
     model::{
-        gateway::{Activity, Ready},
+        gateway::{
+            Activity,
+            Ready
+        },
         prelude::UserId,
         interactions::Interaction,
     },
 };
 use songbird::{
-    driver::{Config as DriverConfig, DecodeMode},
+    driver::{
+        Config as DriverConfig,
+        DecodeMode
+    },
     Event,
     EventContext,
     EventHandler as VoiceEventHandler,
-    model::payload::{ClientDisconnect, Speaking},
+    model::payload::{
+        ClientDisconnect,
+        Speaking
+    },
     SerenityInit,
     Songbird,
 };
@@ -46,26 +62,20 @@ impl EventHandler for Handler {
         new_interaction(String::from("join"), String::from("Makes the bot join your voice channel.")).await;
         new_interaction(String::from("leave"), String::from("Makes the bot leave your voice channel.")).await;
 
-
-
         /*
-        //let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-        let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
+        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("dump")
                 .description("Dump the audio buffer for the current channel in chat.")
         }).await;
-        //let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-        let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
+        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("clear")
                 .description("Clear the audio buffer.")
         }).await;
-        //let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-        let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
+        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("join")
                 .description("Make the bot join your voice channel.")
         }).await;
-        //let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-        let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
+        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("leave")
                 .description("Make the bot leave your voice channel.")
         }).await;
@@ -73,14 +83,16 @@ impl EventHandler for Handler {
         println!("{} is online!", ready.user.name);
     }
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        match &interaction.data {
-            None => {}
-            Some(command) => match command.name.as_str() {
-                "dump" => commands::dump(&ctx, &interaction).await,
-                "clear" => commands::clear(&ctx, &interaction).await,
-                "join" => commands::join(&ctx, &interaction).await,
-                "leave" => commands::leave(&ctx, &interaction).await,
-                _ => {}
+        if let Ok(response) = Response::new(&ctx, interaction).await {
+            match response.data() {
+                None => {}
+                Some(command) => match command.name.as_str() {
+                    "dump"  => commands::dump(&ctx, response).await,
+                    "clear" => commands::clear(&ctx, response).await,
+                    "join"  => commands::join(&ctx, response).await,
+                    "leave" => commands::leave(&ctx, response).await,
+                    _ => {}
+                }
             }
         }
     }
