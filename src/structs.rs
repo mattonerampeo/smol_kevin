@@ -51,7 +51,7 @@ impl Buffer {
 }
 
 pub struct Receiver {
-    pub(crate) lobby: Arc<(Mutex<HashMap<u32, Buffer>>, Mutex<HashMap<u32, UserId>>)>,
+    pub lobby: Arc<(Mutex<HashMap<u32, Buffer>>, Mutex<HashMap<u32, UserId>>)>,
 }
 
 impl Receiver {
@@ -68,10 +68,16 @@ impl TypeMapKey for Lobbies {
     type Value = Arc<RwLock<HashMap<GuildId, Arc<(Mutex<HashMap<u32, Buffer>>, Mutex<HashMap<u32, UserId>>)>>>>; // a game is held within a lobby. the text channel id is the lobby's unique code
 }
 
-pub struct Flags; // void struct used to generate a typemap that holds all active lobbies
+pub struct JoinFlag;
 
-impl TypeMapKey for Flags {
-    type Value = Arc<Mutex<HashSet<GuildId>>>; // a game is held within a lobby. the text channel id is the lobby's unique code
+impl TypeMapKey for JoinFlag {
+    type Value = Arc<Mutex<HashSet<GuildId>>>;
+}
+
+pub struct FollowFlag;
+
+impl TypeMapKey for FollowFlag {
+    type Value = Arc<Mutex<HashMap<GuildId, UserId>>>;
 }
 
 fn buffer_size () -> usize {
@@ -123,7 +129,7 @@ impl Response {
         }).await)
     }
 
-    pub async fn delete(&self, ctx: &Context) {
+    pub async fn _delete(&self, ctx: &Context) {
         check(self.interaction.delete_original_interaction_response(ctx, application_id(ctx).await).await)
     }
 

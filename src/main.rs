@@ -45,6 +45,7 @@ use crate::structs::*;
 use serenity::model::id::GuildId;
 use serenity::model::prelude::VoiceState;
 use std::collections::HashSet;
+use crate::commands::move_to;
 
 struct Handler;
 
@@ -53,17 +54,14 @@ impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         ctx.shard.set_activity(Some(Activity::listening("...YOU...")));
         let application_id = ready.application.id.0; // usually this will be the bot's UserId
-        let existing_commands = ctx.http.get_global_application_commands(application_id).await.unwrap();
-        let existing_commands_set: HashSet<String> = existing_commands.iter().map(|command| command.name.clone()).collect();
+        let update = discord_update();
 
         let new_interaction = |name: String, description: String| async {
-            if existing_commands_set.contains(&name) == false {
+            if update {
                 let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
                     a.name(name)
                         .description(description)
                 }).await;
-            } else {
-                eprintln!("Skipping {} as it's already registered", name)
             }
         };
 
@@ -71,44 +69,61 @@ impl EventHandler for Handler {
         new_interaction(String::from("clear"), String::from("Clears the audio buffer.")).await;
         new_interaction(String::from("join"), String::from("Makes the bot join your voice channel.")).await;
         new_interaction(String::from("leave"), String::from("Makes the bot leave your voice channel.")).await;
+        new_interaction(String::from("follow"), String::from("Makes the bot follow you around.")).await;
+        new_interaction(String::from("unfollow"), String::from("Makes the bot stop following you.")).await;
 
-        /*
+
+
         let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("dump")
-                .description("Dump the audio buffer for the current channel in chat.")
+                .description("test")
         }).await;
         let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("clear")
-                .description("Clear the audio buffer.")
+                .description("test")
         }).await;
         let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("join")
-                .description("Make the bot join your voice channel.")
+                .description("test")
         }).await;
         let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
             a.name("leave")
-                .description("Make the bot leave your voice channel.")
+                .description("test")
         }).await;
-         */
+        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
+            a.name("follow")
+                .description("test")
+        }).await;
+        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
+            a.name("unfollow")
+                .description("test")
+        }).await;
+
 
         println!("{} is online!", ready.user.name);
     }
     async fn voice_state_update(&self, ctx: Context, guild_id: Option<GuildId>, old: Option<VoiceState>, new: VoiceState) {
-        if new.user_id == ctx.cache.current_user_id().await {
-            let data_read = ctx.data.read().await;
-            let flags = data_read.get::<Flags>().expect("Typemap incomplete").clone();
+        let data_read = ctx.data.read().await;
+        let follow_flag = data_read.get::<FollowFlag>().expect("Typemap incomplete").clone();
+        let user_id = new.user_id;
+        let guild_id = guild_id.unwrap();
+        let guild = ctx.cache.guild(guild_id).await.unwrap();
+        if user_id == ctx.cache.current_user_id().await {
+            let flags = data_read.get::<JoinFlag>().expect("Typemap incomplete").clone();
             let mut flags = flags.lock().await;
-            let guild_id = guild_id.unwrap();
             if flags.remove(&guild_id) == false {
-                println!("reconnecting");
                 if let Some(old_vs) = old {
-                    flags.insert(guild_id);
-                    let manager = songbird::get(&ctx).await
-                        .expect("Could not get manager connection.").clone();
-                    let _ = manager.join(guild_id, old_vs.channel_id.unwrap()).await;
+                    drop(flags);
+                    let _ = move_to(&ctx, guild, old_vs.channel_id.unwrap()).await;
                 }
             }
-        }
+        } else if let Some(followed) = follow_flag.lock().await.get(&guild_id) {
+            if followed == &user_id {
+                if let Some(channel_id) = new.channel_id {
+                    let _ = move_to(&ctx, guild, channel_id).await;
+                }
+            }
+        };
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
@@ -120,6 +135,8 @@ impl EventHandler for Handler {
                     "clear" => commands::clear(&ctx, response).await,
                     "join"  => commands::join(&ctx, response).await,
                     "leave" => commands::leave(&ctx, response).await,
+                    "follow" => commands::follow(&ctx, response).await,
+                    "unfollow" => commands::unfollow(&ctx, response).await,
                     _ => {}
                 }
             }
@@ -203,7 +220,8 @@ async fn main() {
     {
         let mut data = client.data.write().await;
         data.insert::<Lobbies>(Arc::new(RwLock::new(HashMap::default())));
-        data.insert::<Flags>(Arc::new(Mutex::new(HashSet::new())));
+        data.insert::<FollowFlag>(Arc::new(Mutex::new(HashMap::default())));
+        data.insert::<JoinFlag>(Arc::new(Mutex::new(HashSet::default())));
     }
 
     let _ = client.start().await.map_err(|why| println!("Client ended: {:?}", why));
@@ -212,4 +230,11 @@ async fn main() {
 fn discord_token() -> String {
     env::var("DISCORD_TOKEN")
         .expect("Expected a token in the environment")
+}
+
+fn discord_update() -> bool {
+    match env::var("DISCORD_UPDATE") {
+        Ok(_) => true,
+        Err(_) => false
+    }
 }

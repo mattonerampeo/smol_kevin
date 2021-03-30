@@ -21,56 +21,24 @@ use tokio::{
     task,
 };
 use crate::structs::*;
+use serenity::model::guild::Guild;
+use serenity::model::id::ChannelId;
 
 pub async fn join(ctx: &Context, response: Response) {
-    let (guild, guild_id) = response.guild(ctx).await;
+    let (guild, _) = response.guild(ctx).await;
     let user_channel = guild.voice_states.get(&response.member()).and_then(|vs| vs.channel_id);
     match user_channel {
         None => {
             response.edit(ctx, "Error: you first need to be in a voice channel").await;
         }
         Some(user_channel_id) => {
-            if let Some(current_channel_id) = guild.voice_states.get(&ctx.cache.current_user_id().await).and_then(|vs| vs.channel_id) {
-                if current_channel_id == user_channel_id {
-                    response.edit(ctx, "Error: the bot is already in your voice channel.").await;
-                    return;
-                }
-            }
-            let data_read = ctx.data.read().await;
-            let _ = data_read.get::<Flags>().expect("Typemap incomplete").clone().lock().await.insert(guild_id);
-            let manager = songbird::get(ctx).await
-                .expect("Songbird Voice client placed in at initialisation.").clone();
-
-            let (handler_lock, conn_result) = manager.join(guild_id, user_channel_id).await;
-
-            if let Ok(_) = conn_result {
-                let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
-                let ssrc_map: HashMap<u32, UserId> = HashMap::new();
-                let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
-                let buffers_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
-                buffers_lock.write().await.insert(guild_id, lobby.clone());
-
-                // NOTE: this skips listening for the actual connection result.
-                let mut handler = handler_lock.lock().await;
-
-                handler.add_global_event(
-                    CoreEvent::VoicePacket.into(),
-                    Receiver::new(lobby.clone()),
-                );
-
-                handler.add_global_event(
-                    CoreEvent::SpeakingStateUpdate.into(),
-                    Receiver::new(lobby.clone()),
-                );
-
-                handler.add_global_event(
-                    CoreEvent::ClientDisconnect.into(),
-                    Receiver::new(lobby.clone()),
-                );
-                //response.delete(ctx).await;
-                response.follow_up(ctx, &format!("Joined {}", user_channel_id.mention())[..]).await;
-            } else {
-                response.edit(ctx, "Error: could not join the channel").await;
+            match move_to(ctx, guild, user_channel_id).await {
+                Ok(()) => {
+                    response.follow_up(ctx, &format!("Joined {}", user_channel_id.mention())[..]).await;
+                },
+                Err(()) => {
+                    response.follow_up(ctx, &format!("Error: couldn't join {}", user_channel_id.mention())[..]).await;
+                },
             }
         }
     }
@@ -103,7 +71,7 @@ pub async fn leave(ctx: &Context, response: Response) {
             // to prevent poison errors, whenever the bot leaves it deletes the buffer for the server
             {
                 let data_read = ctx.data.read().await;
-                let _ = data_read.get::<Flags>().expect("Typemap incomplete").clone().lock().await.insert(guild_id);
+                let _ = data_read.get::<JoinFlag>().expect("Typemap incomplete").clone().lock().await.insert(guild_id);
                 let buffers_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
                 buffers_lock.write().await.remove(&guild_id);
             };
@@ -183,6 +151,85 @@ pub async fn clear(ctx: &Context, response: Response) {
     }
     //response.delete(ctx);
     response.follow_up(ctx, "The buffer has been cleared. No need to thank me").await;
+}
+
+// make the bot follow the user who calls this
+pub async fn follow(ctx: &Context, response: Response) {
+    let user_id = response.member();
+    let (guild, guild_id) = response.guild(ctx).await;
+    {
+        let data_read = ctx.data.read().await;
+        let follow_map = data_read.get::<FollowFlag>().expect("Typemap incomplete").clone();
+        follow_map.lock().await.insert(guild_id, user_id);
+    };
+    response.follow_up(ctx, &format!("The bot will now follow {}", user_id.mention())[..]).await;
+
+    let user_channel = guild.voice_states.get(&user_id).and_then(|vs| vs.channel_id);
+    if let Some(user_channel_id) = user_channel {
+        let _ = move_to(ctx, guild, user_channel_id).await;
+    }
+}
+
+pub async fn unfollow(ctx: &Context, response: Response) {
+    let user_id = response.member();
+    let (_, guild_id) = response.guild(ctx).await;
+    {
+        let data_read = ctx.data.read().await;
+        let follow_map = data_read.get::<FollowFlag>().expect("Typemap incomplete").clone();
+        let mut follow_map_lock = follow_map.lock().await;
+        match follow_map_lock.get(&guild_id) {
+            Some(mapped_user_id) if *mapped_user_id == user_id => {
+                let _ = follow_map_lock.remove(&guild_id);
+                response.follow_up(ctx, &format!("The bot has stopped following {}.", user_id.mention())[..]).await;
+            },
+            _ => {
+                response.follow_up(ctx, &format!("I don't even know who {} is.", user_id.mention())[..]).await;
+            },
+        }
+    };
+}
+
+pub async fn move_to(ctx: &Context, guild: Guild, target_channel_id: ChannelId) -> Result<(),()> {
+    let guild_id = guild.id;
+    if let Some(current_channel_id) = guild.voice_states.get(&ctx.cache.current_user_id().await).and_then(|vs| vs.channel_id) {
+        if current_channel_id == target_channel_id {
+            return Ok(());
+        }
+    }
+    let data_read = ctx.data.read().await;
+    let join_flag = data_read.get::<JoinFlag>().expect("Typemap incomplete").clone();
+    let _ = join_flag.lock().await.insert(guild_id);
+    let manager = songbird::get(ctx).await
+        .expect("Songbird Voice client placed in at initialisation.").clone();
+
+    let (handler_lock, conn_result) = manager.join(guild_id, target_channel_id).await;
+
+    return if let Ok(_) = conn_result {
+        let audio_buffer: HashMap<u32, Buffer> = HashMap::new();
+        let ssrc_map: HashMap<u32, UserId> = HashMap::new();
+        let lobby = Arc::new((Mutex::new(audio_buffer), Mutex::new(ssrc_map)));
+        let buffers_lock = data_read.get::<Lobbies>().expect("Typemap incomplete").clone();
+        buffers_lock.write().await.insert(guild_id, lobby.clone());
+
+        // NOTE: this skips listening for the actual connection result.
+        let mut handler = handler_lock.lock().await;
+
+        handler.add_global_event(
+            CoreEvent::VoicePacket.into(),
+            Receiver::new(lobby.clone()),
+        );
+        handler.add_global_event(
+            CoreEvent::SpeakingStateUpdate.into(),
+            Receiver::new(lobby.clone()),
+        );
+        handler.add_global_event(
+            CoreEvent::ClientDisconnect.into(),
+            Receiver::new(lobby.clone()),
+        );
+        Ok(())
+    } else {
+        Err(())
+    }
 }
 
 fn get_bytes(origin: &Vec<i16>) -> Vec<u8> {
