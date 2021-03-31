@@ -23,6 +23,7 @@ use tokio::{
 use crate::structs::*;
 use serenity::model::guild::Guild;
 use serenity::model::id::ChannelId;
+use serde_json::value::Value::Bool;
 
 pub async fn join(ctx: &Context, response: Response) {
     let (guild, _) = response.guild(ctx).await;
@@ -94,12 +95,30 @@ pub async fn dump(ctx: &Context, response: Response) {
         let encoded_buffers = Arc::new(Mutex::new(Vec::<(Vec<u8>, String)>::new()));
         let mut encoding_threads = Vec::new();
         let output_format = output_format();
-        for (id, buffer) in lobby.iter() {
+        for (id, audio_state_buffer) in lobby.iter() {
             if let Some(user_id) = ssrc_map.get(&id) {
                 if let Some(member) = &members.get(user_id) {
-                    let buffer = buffer.pop();
+                    let options = &response.data().as_ref().unwrap().options;
+                    let mut insert_pauses = true;
+                    for option in options {
+                        match &option.name[..] {
+                            "pauses" => {
+                                if let Some(Bool(val)) = option.value {
+                                    insert_pauses = val;
+                                }
+                            },
+                            _ => {}
+                        }
+                    }
+
+                    let buffer: Vec<i16>;
+                    if insert_pauses {
+                        buffer = audio_state_buffer.pop_uncompressed()
+                    } else {
+                        buffer = audio_state_buffer.pop_compressed()
+                    }
                     let name = member.user.name.clone();
-                    let encoded_buffers = encoded_buffers.clone();
+                    let encoded_buffers_clone = encoded_buffers.clone();
                     let output_format = output_format.clone();
                     encoding_threads.push(
                         task::spawn(async move {
@@ -126,7 +145,7 @@ pub async fn dump(ctx: &Context, response: Response) {
                                 stdin.write_all(&samples[..]).await.unwrap();
                             });
                             let encoded = child.wait_with_output().await.unwrap().stdout;
-                            encoded_buffers.lock().await.push((encoded, format!("{}.{}", name, output_format)));
+                            encoded_buffers_clone.lock().await.push((encoded, format!("{}.{}", name, output_format)));
                         }));
                 }
             }
@@ -135,8 +154,9 @@ pub async fn dump(ctx: &Context, response: Response) {
         for handle in encoding_threads.drain(..) {
             handle.await.unwrap();
         }
+
         response.edit(ctx, "Done!").await;
-        response.follow_up_files(ctx, &*encoded_buffers.lock().await).await;
+        response.follow_up_files(ctx, &*encoded_buffers.clone().lock().await).await;
     };
 }
 
@@ -220,6 +240,10 @@ pub async fn move_to(ctx: &Context, guild: Guild, target_channel_id: ChannelId) 
         );
         handler.add_global_event(
             CoreEvent::SpeakingStateUpdate.into(),
+            Receiver::new(lobby.clone()),
+        );
+        handler.add_global_event(
+            CoreEvent::SpeakingUpdate.into(),
             Receiver::new(lobby.clone()),
         );
         handler.add_global_event(

@@ -46,6 +46,7 @@ use serenity::model::id::GuildId;
 use serenity::model::prelude::VoiceState;
 use std::collections::HashSet;
 use crate::commands::move_to;
+use serenity::model::interactions::ApplicationCommandOptionType;
 
 struct Handler;
 
@@ -56,50 +57,45 @@ impl EventHandler for Handler {
         let application_id = ready.application.id.0; // usually this will be the bot's UserId
         let update = discord_update();
 
-        let new_interaction = |name: String, description: String| async {
-            if update {
-                let _ = Interaction::create_global_application_command(&ctx,  application_id, |a| {
-                    a.name(name)
-                        .description(description)
-                }).await;
-            }
-        };
+        if update {
+            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+                a.name("dump")
+                    .description("Dumps the contents of the audio buffer in chat.")
+                    .create_interaction_option(|opt| {
+                        opt.name("pauses")
+                            .description("[defaults to true] will include pauses between instanses of speech from the user.")
+                            .kind(ApplicationCommandOptionType::Boolean)
+                    })
+                    /*
+                    .create_interaction_option(|opt| {
+                    opt.name("merge")
+                        .description("[defaults to false] will merge all the users' audio into one single track.")
+                        .kind(ApplicationCommandOptionType::Boolean)
 
-        new_interaction(String::from("dump"), String::from("Dumps the audio buffer for the current channel in chat.")).await;
-        new_interaction(String::from("clear"), String::from("Clears the audio buffer.")).await;
-        new_interaction(String::from("join"), String::from("Makes the bot join your voice channel.")).await;
-        new_interaction(String::from("leave"), String::from("Makes the bot leave your voice channel.")).await;
-        new_interaction(String::from("follow"), String::from("Makes the bot follow you around.")).await;
-        new_interaction(String::from("unfollow"), String::from("Makes the bot stop following you.")).await;
+                    })*/
 
-
-
-        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-            a.name("dump")
-                .description("test")
-        }).await;
-        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-            a.name("clear")
-                .description("test")
-        }).await;
-        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-            a.name("join")
-                .description("test")
-        }).await;
-        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-            a.name("leave")
-                .description("test")
-        }).await;
-        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-            a.name("follow")
-                .description("test")
-        }).await;
-        let _ = Interaction::create_guild_application_command(&ctx, GuildId(737641790856888320), application_id, |a| {
-            a.name("unfollow")
-                .description("test")
-        }).await;
-
-
+            }).await;
+            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+                a.name("clear")
+                    .description("Clears the audio buffer.")
+            }).await;
+            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+                a.name("join")
+                    .description("Makes the bot join your voice channel.")
+            }).await;
+            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+                a.name("leave")
+                    .description("Makes the bot leave your voice channel.")
+            }).await;
+            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+                a.name("follow")
+                    .description("Makes the bot follow you around.")
+            }).await;
+            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+                a.name("unfollow")
+                    .description("Makes the bot stop following you.")
+            }).await;
+        }
         println!("{} is online!", ready.user.name);
     }
     async fn voice_state_update(&self, ctx: Context, guild_id: Option<GuildId>, old: Option<VoiceState>, new: VoiceState) {
@@ -156,10 +152,10 @@ impl VoiceEventHandler for Receiver {
                 if let Some(audio) = audio {
                     let buffer = &mut self.lobby.0.lock().await;
                     if let Some(buffer) = buffer.get_mut(&packet.ssrc) {
-                        buffer.push(audio);
+                        buffer.push_audio(audio);
                     } else {
                         let mut new_buffer = Buffer::new();
-                        new_buffer.push(audio);
+                        new_buffer.push_audio(audio);
                         buffer.insert(packet.ssrc, new_buffer);
                     }
                 }
@@ -174,6 +170,20 @@ impl VoiceEventHandler for Receiver {
                 if let Some(user_id) = user_id {
                     let id = user_id.0;
                     ssrc_to_user_map.insert(*ssrc, UserId(id));
+                }
+            }
+
+            Ctx::SpeakingUpdate {
+                ssrc,
+                speaking
+            } => {
+                let audio_buffer = &mut self.lobby.0.lock().await;
+                if let Some(buffer) = audio_buffer.get_mut(ssrc) {
+                    if *speaking {
+                        buffer.push_silence_end();
+                    } else {
+                        buffer.push_silence();
+                    }
                 }
             }
 

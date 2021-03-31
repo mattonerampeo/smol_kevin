@@ -20,34 +20,102 @@ use serenity::{
     prelude::TypeMapKey,
 };
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+#[derive(Clone)]
+pub enum AudioState {
+    Timestamp(Instant),
+    Padding(Duration),
+    Audio(i16),
+    Null
+}
 
 pub struct Buffer {
-    buf: Vec<i16>,
+    buf: Vec<AudioState>,
     pos: usize,
+    silence_pos: Option<usize>,
+    size: usize,
 }
 
 impl Buffer {
     pub fn new() -> Self {
         let size = buffer_size();
         Self {
-            buf: vec![0; size],
+            buf: vec![AudioState::Null; size],
             pos: 0,
+            silence_pos: None,
+            size,
         }
     }
 
-    pub fn push(&mut self, val: &Vec<i16>) {
-        let size = buffer_size();
+    pub fn push_silence_end(&mut self) {
+        if let Some(pos) = self.silence_pos {
+            if let AudioState::Timestamp(time) = self.buf[pos] {
+                    self.buf[pos] = AudioState::Padding(time.elapsed());
+            }
+        }
+    }
+
+    pub fn push_audio(&mut self, val: &Vec<i16>) {
         for bytes in val {
-            self.buf[self.pos] = *bytes;
-            self.pos = if self.pos < size - 1 { self.pos + 1 } else { 0 };
+            self.buf[self.pos] = AudioState::Audio(*bytes);
+            self.pos = if self.pos < self.size - 1 { self.pos + 1 } else { 0 };
         }
     }
 
-    pub fn pop(&self) -> Vec<i16> {
-        let size = buffer_size();
-        let start = if self.pos < size - 1 { self.pos } else { 0 };
-        [&self.buf[start..], &self.buf[..start]].concat()
+    pub fn push_silence(&mut self) {
+        self.buf[self.pos] = AudioState::Timestamp(Instant::now());
+        self.silence_pos = Some(self.pos);
+        self.pos = if self.pos < self.size - 1 { self.pos + 1 } else { 0 };
     }
+
+    pub fn pop_compressed(&self) -> Vec<i16> {
+        let start = if self.pos < self.size - 1 { self.pos } else { 0 };
+        let to_unwrap: Vec<AudioState> = [&self.buf[start..], &self.buf[..start]].concat();
+        to_unwrap.iter().filter_map(|elem| {
+            match elem {
+                AudioState::Audio(audio) => Some(*audio),
+                _ => None
+            }
+        }).collect()
+    }
+
+    pub fn pop_uncompressed(&self) -> Vec<i16> {
+        let start = if self.pos < self.size - 1 { self.pos } else { 0 };
+        let mut audio_state_buffer: Vec<AudioState> = [&self.buf[start..], &self.buf[..start]].concat();
+        audio_state_buffer.reverse();
+        let now = Instant::now();
+        let mut silence_duration: usize = 0;
+        let mut output_chunks: Vec<Vec<i16>> = Vec::new();
+        for elem in audio_state_buffer {
+            match elem {
+                AudioState::Audio(audio) => output_chunks.push(vec![audio]),
+                AudioState::Padding(duration) => {
+                    let padding = (duration.as_secs_f64() * 96000.0) as usize;
+                    silence_duration += padding;
+                    if silence_duration > (120 * 96000) {
+                        break
+                    } else {
+                        output_chunks.push(vec![0; padding])
+                    }
+                },
+                AudioState::Timestamp(time) => {
+                    let duration = now.duration_since(time);
+                    let padding = (duration.as_secs_f64() * 96000.0) as usize;
+                    silence_duration += padding;
+                    if silence_duration > (120 * 96000) {
+                        break
+                    } else {
+                        output_chunks.push(vec![0; padding])
+                    }
+                },
+                AudioState::Null => {},
+            }
+        }
+        output_chunks.reverse();
+        output_chunks.concat()
+    }
+
 }
 
 pub struct Receiver {
@@ -83,8 +151,8 @@ impl TypeMapKey for FollowFlag {
 fn buffer_size () -> usize {
     match env::var("DISCORD_BUFFER_SIZE") {
         Ok(custom_size) => custom_size.parse::<usize>()
-            .expect("make sure the custom buffer is valid!"),
-        Err(_) => 1440000
+            .expect("make sure the custom buffer is valid!") / 2,
+        Err(_) => 1440000 // it's 15 seconds of audio
     }
 }
 
