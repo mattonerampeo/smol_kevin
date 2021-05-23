@@ -18,7 +18,10 @@ use serenity::{
             Ready
         },
         prelude::UserId,
-        interactions::Interaction,
+        interactions::{
+            ApplicationCommand,
+            Interaction,
+        },
     },
 };
 use songbird::{
@@ -54,14 +57,13 @@ struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
         ctx.shard.set_activity(Some(Activity::listening("...YOU...")));
-        let application_id = ready.application.id.0; // usually this will be the bot's UserId
         let update = discord_update();
 
         if update {
-            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+            let _ = ApplicationCommand::create_global_application_command(&ctx, |a| {
                 a.name("dump")
                     .description("Dumps the contents of the audio buffer in chat.")
-                    .create_interaction_option(|opt| {
+                    .create_option(|opt| {
                         opt.name("pauses")
                             .description("[defaults to true] will include pauses between instanses of speech from the user.")
                             .kind(ApplicationCommandOptionType::Boolean)
@@ -75,23 +77,23 @@ impl EventHandler for Handler {
                     })*/
 
             }).await;
-            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+            let _ = ApplicationCommand::create_global_application_command(&ctx, |a| {
                 a.name("clear")
                     .description("Clears the audio buffer.")
             }).await;
-            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+            let _ = ApplicationCommand::create_global_application_command(&ctx, |a| {
                 a.name("join")
                     .description("Makes the bot join your voice channel.")
             }).await;
-            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+            let _ = ApplicationCommand::create_global_application_command(&ctx, |a| {
                 a.name("leave")
                     .description("Makes the bot leave your voice channel.")
             }).await;
-            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+            let _ = ApplicationCommand::create_global_application_command(&ctx, |a| {
                 a.name("follow")
                     .description("Makes the bot follow you around.")
             }).await;
-            let _ = Interaction::create_global_application_command(&ctx, application_id, |a| {
+            let _ = ApplicationCommand::create_global_application_command(&ctx, |a| {
                 a.name("unfollow")
                     .description("Makes the bot stop following you.")
             }).await;

@@ -166,7 +166,7 @@ impl Response {
             response.interaction_response_data(|m| {
                 m.flags(InteractionApplicationCommandCallbackDataFlags::EPHEMERAL)
             })
-                .kind(InteractionResponseType::AcknowledgeWithSource) // WARN si comporta come DeferredChannelMessageWithSource
+                .kind(InteractionResponseType::DeferredChannelMessageWithSource) // WARN si comporta come DeferredChannelMessageWithSource
         }).await {
             Ok(Response{
                 interaction,
@@ -181,30 +181,24 @@ impl Response {
     }
 
     pub async fn guild(&self, ctx: &Context) -> (Guild, GuildId) {
-        let guild_id = self.interaction.guild_id;
+        let guild_id = self.interaction.guild_id.unwrap();
         let guild = ctx.cache.guild(guild_id).await.unwrap();
         (guild, guild_id)
     }
 
     pub fn member(&self) -> UserId {
-        self.interaction.member.user.id
+        self.interaction.member.as_ref().unwrap().user.id
     }
 
     pub async fn edit(&self, ctx: &Context, message_content: &str) {
-        check(self.interaction.edit_original_interaction_response(ctx, application_id(ctx).await, |m| {
-                m.content(message_content)
-                    //.embed(|m| m.description(message_content))
+        check(self.interaction.edit_original_interaction_response(ctx, |m| {
+                m.create_embed(|e| e.description(message_content))
         }).await)
     }
 
-    pub async fn _delete(&self, ctx: &Context) {
-        check(self.interaction.delete_original_interaction_response(ctx, application_id(ctx).await).await)
-    }
-
     pub async fn follow_up(&self, ctx: &Context, message_content: &str) {
-        check(self.interaction.create_followup_message(ctx, application_id(ctx).await, false, |m| {
-            m.content(message_content)
-                .embed(|m| m.description(message_content))
+        check(self.interaction.create_followup_message(ctx, |m| {
+            m.embed(|e| e.description(message_content))
         }).await)
     }
 
@@ -224,12 +218,8 @@ impl Response {
     async fn send_files_embed_on_channel (&self, ctx: &Context, files: &Vec<(Vec<u8>, String)>) {
         let files_with_references = files.iter()
             .map(|(audio, name)| (&audio[..], &name[..])).collect::<Vec<_>>();
-        check(self.interaction.channel_id.send_message(ctx, |m| m.add_files(files_with_references)).await);
+        check(self.interaction.channel_id.unwrap().send_message(ctx, |m| m.add_files(files_with_references)).await);
     }
-}
-
-pub async fn application_id(ctx: &Context) -> u64 {
-    ctx.cache.current_user_id().await.0
 }
 
 fn check<T>(result: SerenityResult<T>) {
