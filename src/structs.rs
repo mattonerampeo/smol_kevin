@@ -198,7 +198,8 @@ impl Response {
 
     pub async fn follow_up(&self, ctx: &Context, message_content: &str) {
         check(self.interaction.create_followup_message(ctx, |m| {
-            m.embed(|e| e.description(message_content))
+            m.content(message_content)
+                //.embed(|e| e.description(message_content))
         }).await)
     }
 

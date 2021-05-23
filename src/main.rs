@@ -22,6 +22,7 @@ use serenity::{
             ApplicationCommand,
             Interaction,
         },
+        id::ApplicationId
     },
 };
 use songbird::{
@@ -225,6 +226,7 @@ async fn main() {
 
     let mut client = Client::builder(&token)
         .event_handler(Handler)
+        .application_id(discord_app_id())
         .register_songbird_with(songbird.into())
         .await
         .expect("Err creating client");
@@ -248,5 +250,12 @@ fn discord_update() -> bool {
     match env::var("DISCORD_UPDATE") {
         Ok(_) => true,
         Err(_) => false
+    }
+}
+
+fn discord_app_id() -> u64 {
+    match env::var("DISCORD_APP_ID") {
+        Ok(id) => id.parse().expect("application id is not a valid id"),
+        Err(_) => panic!("Expected an application id (DISCORD_APP_ID) in the environment")
     }
 }
