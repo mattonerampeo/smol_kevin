@@ -6,12 +6,13 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]
-#songbird = "0.1.0"
-#discortp = "0.2"
-#chrono = "0.4.19"
 confy = "0.4.0"
 serde = "1.0.130"
 async-trait = "0.1.51"
+tracing = "0.1"
+tracing-subscriber = "0.2"
+tracing-futures = "0.2"
+songbird = "0.2.0"
 
 [dependencies.serenity]
 version = "0.10"

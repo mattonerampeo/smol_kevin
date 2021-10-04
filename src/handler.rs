@@ -1,10 +1,14 @@
-mod execution;
-use execution::*;
-use serenity::prelude::*;
+use async_trait::async_trait;
 use serenity::model::prelude::*;
 use serenity::model::prelude::application_command::*;
-use async_trait::async_trait;
+use serenity::prelude::*;
+
+use execution::*;
+
 use crate::setup_utils::load_bot_config;
+
+mod execution;
+mod voice;
 
 pub struct Handler;
 
@@ -36,7 +40,7 @@ impl EventHandler for Handler {
         }
 
         ctx.shard.set_activity(Some(Activity::listening("your soul")));
-        println!("{} is online!", ready.user.name);
+        println!("{} is online and connected!", ready.user.name);
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
