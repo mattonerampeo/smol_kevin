@@ -1,29 +1,20 @@
 use serenity::{
     async_trait,
-    client::{Client, Context, EventHandler},
+    client::Context,
     model::{
-        channel::Message,
         channel::ChannelType,
-        gateway::Ready,
-        guild::Guild,
         id::ChannelId,
         id::GuildId,
         id::UserId,
-        misc::Mentionable
     },
-    Result as SerenityResult,
-
 };
 use serenity::model::interactions::application_command::ApplicationCommandInteraction;
 use songbird::{
-    Config,
     CoreEvent,
-    driver::DecodeMode,
     Event,
     EventContext,
     EventHandler as VoiceEventHandler,
     model::payload::{ClientConnect, ClientDisconnect, Speaking},
-    SerenityInit,
 };
 
 struct Receiver;
@@ -139,51 +130,56 @@ pub async fn find_user_voice_channel(ctx: &Context, guild_id: GuildId, user_id: 
     Err(())
 }
 
-pub async fn join(ctx: &Context, guild_id: GuildId, connect_to: ChannelId) -> Result<(), ()> {
-    let manager = songbird::get(ctx).await
-        .expect("Songbird Voice client placed in at initialisation.").clone();
+pub async fn join(ctx: &Context, command: &ApplicationCommandInteraction) -> String {
+    if let Some(guild_id) = command.guild_id {
+        let manager = songbird::get(ctx).await
+            .expect("Could not retrieve songbird manager");
+                if let Ok(channel_id) = find_user_voice_channel(ctx, guild_id, command.user.id).await {
+                    let (handler_lock, conn_result) = manager.join(guild_id, channel_id).await;
+                        if let Err(_) = conn_result{
+                            format!("~ ERROR: could not connect to channel ~")
+                        } else {
+                            // NOTE: this skips listening for the actual connection result.
+                            let mut handler = handler_lock.lock().await;
 
-    let (handler_lock, conn_result) = manager.join(guild_id, connect_to).await;
+                            handler.add_global_event(
+                                CoreEvent::SpeakingStateUpdate.into(),
+                                Receiver::new(),
+                            );
 
-    if let Ok(_) = conn_result {
-        // NOTE: this skips listening for the actual connection result.
-        let mut handler = handler_lock.lock().await;
+                            handler.add_global_event(
+                                CoreEvent::SpeakingUpdate.into(),
+                                Receiver::new(),
+                            );
 
-        handler.add_global_event(
-            CoreEvent::SpeakingStateUpdate.into(),
-            Receiver::new(),
-        );
+                            handler.add_global_event(
+                                CoreEvent::VoicePacket.into(),
+                                Receiver::new(),
+                            );
 
-        handler.add_global_event(
-            CoreEvent::SpeakingUpdate.into(),
-            Receiver::new(),
-        );
+                            handler.add_global_event(
+                                CoreEvent::RtcpPacket.into(),
+                                Receiver::new(),
+                            );
 
-        handler.add_global_event(
-            CoreEvent::VoicePacket.into(),
-            Receiver::new(),
-        );
+                            handler.add_global_event(
+                                CoreEvent::ClientConnect.into(),
+                                Receiver::new(),
+                            );
 
-        handler.add_global_event(
-            CoreEvent::RtcpPacket.into(),
-            Receiver::new(),
-        );
+                            handler.add_global_event(
+                                CoreEvent::ClientDisconnect.into(),
+                                Receiver::new(),
+                            );
 
-        handler.add_global_event(
-            CoreEvent::ClientConnect.into(),
-            Receiver::new(),
-        );
-
-        handler.add_global_event(
-            CoreEvent::ClientDisconnect.into(),
-            Receiver::new(),
-        );
-
+                            format!("Hi!")
+                        }
+                } else {
+                    format!("You need to be in a voice channel to call the bot ~.-")
+                }
     } else {
-        // handle a failed join
+        format!("~ ERROR: this bot only works inside of a guild, no funny business with private channels ~")
     }
-
-    Ok(()) // once we handle fails I need to remove this and return a meaningful result
 }
 
 pub async fn leave(ctx: &Context, command: &ApplicationCommandInteraction) -> String {
@@ -194,7 +190,6 @@ pub async fn leave(ctx: &Context, command: &ApplicationCommandInteraction) -> St
             let _current_channel = call.lock().await.current_channel().clone();
             drop(call);
             if let Some(current_channel) = _current_channel {
-                println!("done");
                 if let Ok(channel_id) = find_user_voice_channel(ctx, guild_id, command.user.id).await {
                     if current_channel.0 == channel_id.0 {
                         drop(current_channel);

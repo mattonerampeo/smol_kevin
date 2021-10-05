@@ -1,22 +1,18 @@
 use serenity::Client;
 use songbird::{
     Config,
-    CoreEvent,
     driver::DecodeMode,
-    Event,
-    EventContext,
-    EventHandler as VoiceEventHandler,
-    model::payload::{ClientConnect, ClientDisconnect, Speaking},
     SerenityInit,
 };
+
 use handler::Handler;
 
-mod setup_utils;
+mod setup;
 mod handler;
 
 #[tokio::main]
 async fn main() {
-    let config = setup_utils::load_bot_config();
+    let config = setup::load_bot_config();
 
     let songbird_config = Config::default()
         .decode_mode(DecodeMode::Decode);

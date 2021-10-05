@@ -5,10 +5,11 @@ use serenity::prelude::*;
 
 use execution::*;
 
-use crate::setup_utils::load_bot_config;
+use crate::setup::load_bot_config;
 
 mod execution;
 mod voice;
+mod utils;
 
 pub struct Handler;
 
