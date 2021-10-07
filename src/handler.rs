@@ -10,6 +10,7 @@ use crate::setup::load_bot_config;
 mod execution;
 mod voice;
 mod utils;
+mod receiver;
 
 pub struct Handler;
 
